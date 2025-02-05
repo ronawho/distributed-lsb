@@ -18,12 +18,18 @@
 #define MASK (N_BUCKETS - 1)
 using counts_array_t = std::array<int64_t, COUNTS_SIZE>;
 
-static MPI_Datatype gMpiElementType;
-
 struct SortElement {
   uint64_t key; // to sort by
   uint64_t val; // carried along
 };
+static MPI_Datatype gSortElementMpiType;
+
+struct CountBufElt {
+  int32_t digit;
+  int32_t rank;
+  int64_t count;
+};
+static MPI_Datatype gCountBufEltMpiType;
 
 static int64_t divCeil(int64_t x, int64_t y) {
   return (x + y - 1) / y;
@@ -61,7 +67,7 @@ void localShuffle(std::vector<SortElement>& A,
     int64_t sum = 0;
     for (int i = 0; i < COUNTS_SIZE; i++) {
       starts[i] = sum;
-      sum += count;
+      sum += counts[i];
     }
   }
 
@@ -76,7 +82,7 @@ void localShuffle(std::vector<SortElement>& A,
   int64_t sum = 0;
   for (int i = 0; i < COUNTS_SIZE; i++) {
     starts[i] = sum;
-    sum += count;
+    sum += counts[i];
   }
 }
 
@@ -91,41 +97,135 @@ void globalShuffle(std::vector<SortElement>& A,
   auto starts = std::make_unique<counts_array_t>();
   auto counts = std::make_unique<counts_array_t>();
 
-  localShuffle(A, B, *starts, *counts, digit);
+  localShuffle(A, B, *starts, *counts, n, digit);
 
   // Now, each rank has an array of counts, like this
-  //  [r0d0, r0d1, ... r0d255]
-  //  [r1d0, r1d1, ... r1d255]
+  //  [r0d0, r0d1, ... r0d255]  | on rank 0
+  //  [r1d0, r1d1, ... r1d255]  | on rank 1
   //  ...
   //
 
   // We need to transpose these so that the counts have the
   // starting digits first
-  //  [r0d0, r1d0, r2d0, ...]
-  //  [r0d1, r1d1, r2d1, ...]
+  //  [r0d0, r1d0, r2d0, ...]   | on rank 0
+  //  [r0d1, r1d1, r2d1, ...]   | 
+  //  [r0d2, r1d2, r2d2, ...]   | on rank 1 ...
   //  ...
 
-  // Here we create a distributed array storing this transposition.
-  int64_t globCountsPerNode = divCeil(COUNTS_SIZE, numRanks);
-  std::vector<int64_t> C;
-  C.resize(globCountsPerNode);
+  // Conceptually, create a distributed array storing this transposition.
+  int64_t globCountsPerNode = divCeil(COUNTS_SIZE*numRanks, numRanks);
+  std::vector<int64_t> GlobalCounts;
+  GlobalCounts.resize(globCountsPerNode);
 
-  Scatter
-    AllToAll
-    Gather
-  // Transpose the counts
-  MPI_Alltoallv(
-int MPI_Alltoallv(const void *sendbuf, const int sendcounts[],
-    const int sdispls[], MPI_Datatype sendtype,
-    void *recvbuf, const int recvcounts[],
+  // And a distributed array storing the CountBufElt type.
+  std::vector<CountBufElt> recvBuf;
+  recvBuf.resize(globCountsPerNode);
 
-  // Do the global scan to compute the start position for each bucket
-  // Note: this needs transposed order!
-}
+  // Prepare for MPI_AllToAllv
+  std::vector<int> sendCounts, sendDisplacements, recvCounts, recvDisplacements;
+  sendCounts.resize(numRanks);
+  sendDisplacements.resize(numRanks);
+  recvCounts.resize(numRanks);
+  recvDisplacements.resize(numRanks);
+  std::vector<CountBufElt> sendBuf;
+  sendBuf.resize(COUNTS_SIZE);
+  int rankCount = 0;
+  int rankStart = 0;
+  int lastRank = -1;
+  for (int i = 0; i < COUNTS_SIZE; i++) {
+    int dstRank = i / globCountsPerNode;
+    sendCounts[dstRank]++;
+    CountBufElt c;
+    c.digit = i;
+    c.rank = myRank;
+    c.count = counts[i];
+    sendBuf[i] = c;
+  }
+  // compute sendDisplacements
+  {
+    int sum = 0;
+    for (int i = 0; i < numRanks; i++) {
+      sendDisplacements[i] = sum;
+      sum += sendCounts[i];
+    }
+  }
 
+  // Dissemenate the counts to send to each node
+  // for use in recvCounts
+  {
+    std::vector<int> tmpDspl, tmpCounts;
+    tmpDspl.resize(numRanks);
+    tmpCounts.resize(numRanks);
+    for (int i = 0; i < numRanks; i++) {
+      tmpDspl[i] = i;
+      tmpCounts[i] = 1;
+    }
+    MPI_Alltoallv(/*sendbuf*/ &sendCounts[0],
+                  /*sendcounts*/ &tmpCounts[0],
+                  /*sdispls*/ &tmpDspl[0],
+                  MPI_INT,
+                  /*recvbuf*/ &recvCounts[0],
+                  /*recvcounts*/ &tmpCounts[0],
+                  /*rdispls*/ &tmpDspl[0],
+                  MPI_INT,
+                  MPI_COMM_WORLD);
+    // compute recvDisplacements
+    int sum = 0;
+    for (int i = 0; i < numRanks; i++) {
+      recvDisplacements[i] = sum;
+      sum += recvCounts[i];
+    }
+  }
 
-int MPI_Scan(const void *sendbuf, void *recvbuf, int count,
-             MPI_Datatype datatype, MPI_Op op, MPI_Comm comm)
+  // send the counts, which won't be in the right order yet
+  MPI_Alltoallv(/*sendbuf*/ &sendBuf[0],
+                /*sendcounts*/ &sendCounts[0],
+                /*sdispls*/ &sendDisplacements[0],
+                gCountBufEltMpiType,
+                /*recvbuf*/ &recvBuf[0],
+                /*recvcounts*/ &recvCounts[0],
+                /*rdispls*/ &recvDisplacements[0],
+                gCountBufEltMpiType,
+                MPI_COMM_WORLD);
+
+  // now sort recvBuf according to digit
+  std::sort(recvBuf.begin(), recvBuf.end(),
+            [](const CountBufElt& a, const CountBufElt& b) {
+                if a.digit != b.digit {
+                  return a.digit < b.digit;
+                }
+                return a.rank < b.rank;
+            });
+
+  // now store from recvBuf into the global counts array C
+  for (int64_t i = 0; i < globCountsPerNode; i++) {
+    CountBufElt elt = recvBuf[i];
+    int64_t globalIdx = elt.digit * numRanks + elt.rank;
+    assert(globalIdx == myRank*globCountsPerNode + i);
+    GlobalCounts[i] = elt.count;
+  }
+
+  // Now compute the total of the counts for each chunk of the global
+  // counts array
+  int64_t myTotalCount = 0;
+  for (int64_t i = 0; i < globCountsPerNode; i++) {
+    myTotalCount += GlobalCounts[i];
+  }
+
+  // Now use MPI_Scan to add up the total counts from each rank
+  int64_t myGlobalStart = 0;
+  MPI_Scan(&myTotalCount, &myGlobalStart, 1, MPI_LONG_LONG);
+
+  // Now compute the global starts
+  std::vector<int64_t> GlobalStarts;
+  GlobalStarts.resize(globCountsPerNode);
+
+  for (int64_t i = 0; i < globCountsPerNode; i++) {
+    GlobalStarts[i] = myGlobalSTart;
+    myGlobalStart += GlobalCounts[i];
+  }
+
+  // Now partition the data according to GlobalStarts
 }
 
 int main(int argc, char *argv[]) {
@@ -151,16 +251,26 @@ int main(int argc, char *argv[]) {
 
   // setup the global type
   assert(sizeof(unsigned long long) == sizeof(uint64_t));
-  MPI_Type_contiguous(2, MPI_UNSIGNED_LONG_LONG, &gMpiElementType);
+  assert(2*sizeof(unsigned long long) == sizeof(SortElement));
+  MPI_Type_contiguous(2, MPI_UNSIGNED_LONG_LONG, &gSortElementMpiType);
+  MPI_Type_commit(&gSortElementMpiType);
+  assert(2*sizeof(unsigned long long) == sizeof(CountBufElt));
+  MPI_Type_contiguous(2, MPI_UNSIGNED_LONG_LONG, &gCountBufEltMpiType);
+  MPI_Type_commit(&gCountBufEltMpiType);
 
   // create a "distributed array" in the form of different allocations
   // on each node.
   int64_t perNode = divCeil(n, numRanks);
+  int64_t myChunkSize = perNode;
+  if (perNode*myRank + myChunkSize > n) {
+    myChunkSize = n - perNode*myRank;
+    if (myChunkSize < 0) myChunkSize = 0;
+  }
 
   std::vector<SortElement> A;
-  A.resize(perNode);
+  A.resize(myChunkSize);
   std::vector<SortElement> B;
-  B.resize(perNode);
+  B.resize(myChunkSize);
  
   // set up the values to random values and the indices to global indices
   {
