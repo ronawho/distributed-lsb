@@ -581,11 +581,15 @@ int main(int argc, char *argv[]) {
   MPI_Init(&argc, &argv);
 
   // read in the problem size
+  bool printSome = false;
   int64_t n = 100*1000*1000;
   for (int i = 1; i < argc; i++) {
     if (std::string(argv[i]) == "--n") {
       n = std::stoll(argv[++i]);
+    } else if (std::string(argv[i]) == "--print") {
+      printSome = true;
     }
+
   }
 
   int myRank = 0;
@@ -643,7 +647,9 @@ int main(int argc, char *argv[]) {
   }
 
   // Print out the first few elements on each locale
-  A.print(10);
+  if (printSome) {
+    A.print(10);
+  }
 
   // Shuffle the data in-place to sort by the current digit
   {
@@ -670,7 +676,9 @@ int main(int argc, char *argv[]) {
   }
  
   // Print out the first few elements on each locale
-  A.print(10);
+  if (printSome) {
+    A.print(10);
+  }
 
   MPI_Finalize();
   return 0;
