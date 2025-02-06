@@ -1,9 +1,15 @@
-#include <cassert>
+#include <array>
 #include <chrono>
-#include <cstdint>
+#include <iomanip>
+#include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
+
+#include <cassert>
+#include <cstdint>
+
+#include <unistd.h>
 
 #include <mpi.h>
 #include <pcg_random.hpp>
@@ -13,26 +19,181 @@
 // raise exeptions.
 
 #define RADIX 16
+#define N_DIGITS (64/RADIX)
 #define N_BUCKETS (1 << RADIX)
 #define COUNTS_SIZE (N_BUCKETS + 1)
 #define MASK (N_BUCKETS - 1)
 using counts_array_t = std::array<int64_t, COUNTS_SIZE>;
 
+// the elements to sort
 struct SortElement {
-  uint64_t key; // to sort by
-  uint64_t val; // carried along
+  uint64_t key = 0; // to sort by
+  uint64_t val = 0; // carried along
 };
+std::ostream& printhex(std::ostream& os, uint64_t key) {
+  std::ios oldState(nullptr);
+  oldState.copyfmt(os);
+  os << std::setfill('0') << std::setw(16) << std::hex << key;
+  os.copyfmt(oldState);
+  return os;
+}
+std::ostream& operator<<(std::ostream& os, const SortElement& x) {
+  os << "(";
+  printhex(os, x.key);
+  os << "," << x.val << ")";
+  return os;
+}
 static MPI_Datatype gSortElementMpiType;
 
+// to help in communicating the counts
 struct CountBufElt {
-  int32_t digit;
-  int32_t rank;
-  int64_t count;
+  int32_t digit = 0;
+  int32_t rank = 0;
+  int64_t count = 0;
 };
+std::ostream& operator<<(std::ostream& os, const CountBufElt& x) {
+  os << "(" << x.digit << "," << x.rank << "," << x.count << ")";
+  return os;
+}
 static MPI_Datatype gCountBufEltMpiType;
 
-static int64_t divCeil(int64_t x, int64_t y) {
+// to help in communicating the elements
+struct ShuffleBufSortElement {
+  uint64_t key = 0;
+  uint64_t val = 0;
+  int64_t  dstGlobalIdx = 0;
+};
+std::ostream& operator<<(std::ostream& os, const ShuffleBufSortElement& x) {
+  os << "(";
+  printhex(os, x.key);
+  os << "," << x.val << "," << x.dstGlobalIdx << ")";
+  return os;
+}
+static MPI_Datatype gShuffleBufSortElementMpiType;
+
+
+// to help with sending sort elements to remote locales
+// helper to divide while rounding up
+static inline int64_t divCeil(int64_t x, int64_t y) {
   return (x + y - 1) / y;
+}
+
+// Store a different type for distributed arrays just to make the code
+// clearer.
+// This actually just stores the current rank's portion of a distributed
+// array along with some metadata.
+// It doesn't support communication directly. Communication is expected
+// to happen in the form of MPI calls working with localPart().
+template<typename EltType>
+struct DistributedArray {
+  struct RankAndLocalIndex {
+    int rank = 0;
+    int64_t locIdx = 0;
+  };
+
+  std::string name_;
+  std::vector<EltType> localPart_;
+  int64_t numElementsTotal_ = 0;    // number of elements on all ranks
+  int64_t numElementsPerRank_ = 0 ; // number per rank
+  int64_t numElementsHere_ = 0;     // number this rank
+  int myRank_ = 0;
+  int numRanks_ = 0;
+
+  static DistributedArray<EltType>
+  create(std::string name, int64_t totalNumElements);
+
+  // convert a local index to a global index
+  inline int64_t localIdxToGlobalIdx(int64_t locIdx) const {
+    return myRank_*numElementsPerRank_ + locIdx;
+  }
+  // convert a global index into a local index
+  inline RankAndLocalIndex globalIdxToLocalIdx(int64_t glbIdx) const {
+    RankAndLocalIndex ret;
+    int64_t rank = glbIdx / numElementsPerRank_;
+    int64_t locIdx = glbIdx - rank*numElementsPerRank_;
+    ret.rank = rank;
+    ret.locIdx = locIdx;
+    return ret;
+  }
+
+  // accessors
+  inline const std::string& name() const { return name_; }
+  inline const std::vector<EltType>& localPart() const { return localPart_; }
+  inline std::vector<EltType>& localPart() { return localPart_; }
+  inline int64_t numElementsTotal() const { return numElementsTotal_; }
+  inline int64_t numElementsPerRank() const { return numElementsPerRank_; }
+  inline int64_t numElementsHere() const { return numElementsHere_; }
+  inline int myRank() const { return myRank_; }
+  inline int numRanks() const { return numRanks_; }
+
+  // helper to print part of the distributed array
+  void print(int64_t nToPrintPerRank) const;
+};
+
+template<typename EltType>
+DistributedArray<EltType>
+DistributedArray<EltType>::create(std::string name, int64_t totalNumElements) {
+  int myRank = 0;
+  int numRanks = 0;
+  MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
+  MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
+ 
+  int64_t eltsPerRank = divCeil(totalNumElements, numRanks);
+  int64_t eltsHere = eltsPerRank;
+  if (eltsPerRank*myRank + eltsHere > totalNumElements) {
+    eltsHere = totalNumElements - eltsPerRank*myRank;
+  }
+  if (eltsHere < 0) eltsHere = 0;
+
+  DistributedArray<EltType> ret;
+  ret.name_ = std::move(name);
+  ret.localPart_.resize(eltsHere);
+  ret.numElementsTotal_ = totalNumElements;
+  ret.numElementsPerRank_ = eltsPerRank;
+  ret.numElementsHere_ = eltsHere;
+  ret.myRank_ = myRank;
+  ret.numRanks_ = numRanks;
+
+  return ret;
+}
+
+static void flushOutput() {
+  // this is a workaround to make it more likely that the output is printed
+  // to the terminal in the correct order.
+  // *it might not work*
+  std::cout << std::flush;
+  usleep(100);
+}
+
+template<typename EltType>
+void DistributedArray<EltType>::print(int64_t nToPrintPerRank) const {
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  if (myRank_ == 0) {
+    if (nToPrintPerRank*numRanks_ >= numElementsTotal_) {
+      std::cout << name_ << ": displaying all "
+                << numElementsTotal_ << " elements\n";
+    } else {
+      std::cout << name_ << ": displaying first " << nToPrintPerRank
+                << " elements on each rank"
+                << " out of " << numElementsTotal_ << " elements\n";
+    }
+  }
+
+  for (int rank = 0; rank < numRanks_; rank++) {
+    if (myRank_ == rank) {
+      int64_t i = 0;
+      for (i = 0; i < nToPrintPerRank && i < numElementsHere_; i++) {
+        int64_t glbIdx = localIdxToGlobalIdx(i);
+        std::cout << name_ << "[" << glbIdx << "] = " << localPart_[i] << "\n";
+      }
+      if (i < numElementsHere_) {
+        std::cout << "...\n";
+      }
+      flushOutput();
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+  }
 }
 
 // compute the bucket for a value when sort is on digit 'd'
@@ -43,7 +204,7 @@ inline int getBucket(SortElement x, int d) {
 // rearranges data according values at 'digit' & returns count information
 //   A: contains the input data
 //   B: after it runs, contains the rearranged data
-//   starts: after it runs, contains the start index for each bucket
+//   starts: should not be used after it runs
 //   counts: after it runs, contains the number of elements for each bucket
 //   digit: the current digit for shuffling
 void localShuffle(std::vector<SortElement>& A,
@@ -59,7 +220,7 @@ void localShuffle(std::vector<SortElement>& A,
 
   // compute the count for each digit
   for (SortElement elt : A) {
-    counts[getBucket(elt)] += 1;
+    counts[getBucket(elt, digit)] += 1;
   }
 
   // compute the starts with an exclusive scan
@@ -73,21 +234,246 @@ void localShuffle(std::vector<SortElement>& A,
 
   // shuffle the data
   for (SortElement elt : A) {
-    int64_t &next = starts[getBucket(elt)];
+    int64_t &next = starts[getBucket(elt, digit)];
     B[next] = elt;
     next += 1;
   }
+}
 
-  // recompute the starts array for returning it
-  int64_t sum = 0;
-  for (int i = 0; i < COUNTS_SIZE; i++) {
-    starts[i] = sum;
-    sum += counts[i];
+// helper for MPI_Alltoallv that:
+//   * assumes elements in 'sendbuf' are sorted according to destination rank
+//   * 'sendcounts[dstRank]' indicates how many elements to send to dst rank
+//     and the total of sendcounts should be the same as sendbuf in size.
+//     Since 'sendbuf' is sorted according to destination rank, these
+//     elements must contiguous in sendBuf.
+//   * automatically computes send displacements, recv counts, and recv
+//     displacements
+template<typename T> 
+void myMpiAllToAllV(const std::vector<T>& sendBuf,
+                    const std::vector<int>& sendCounts,
+                    std::vector<T>& recvBuf,
+                    MPI_Datatype dt) {
+  int myRank = 0;
+  int numRanks = 0;
+  MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
+  MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
+
+  assert(sendCounts.size() == numRanks);
+
+  std::vector<int> recvCounts;
+  recvCounts.resize(numRanks);
+
+  // Communicate the send counts to the destination nodes
+  // where they will form the receive counts
+  std::vector<int> tmpDspl, tmpCounts;
+  tmpDspl.resize(numRanks);
+  tmpCounts.resize(numRanks);
+  for (int i = 0; i < numRanks; i++) {
+    tmpDspl[i] = i;
+    tmpCounts[i] = 1;
+  }
+  MPI_Alltoallv(/*sendbuf*/ &sendCounts[0],
+                /*sendcounts*/ &tmpCounts[0],
+                /*sdispls*/ &tmpDspl[0],
+                MPI_INT,
+                /*recvbuf*/ &recvCounts[0],
+                /*recvcounts*/ &tmpCounts[0],
+                /*rdispls*/ &tmpDspl[0],
+                MPI_INT,
+                MPI_COMM_WORLD);
+
+  // compute the send displacements
+  std::vector<int> sendDisplacements;
+  sendDisplacements.resize(numRanks);
+  {
+    int sum = 0;
+    for (int i = 0; i < numRanks; i++) {
+      sendDisplacements[i] = sum;
+      sum += sendCounts[i];
+    }
+    assert(sum == sendBuf.size());
+  }
+
+  // compute the recv displacements
+  std::vector<int> recvDisplacements;
+  recvDisplacements.resize(numRanks);
+  {
+    int sum = 0;
+    for (int i = 0; i < numRanks; i++) {
+      recvDisplacements[i] = sum;
+      sum += recvCounts[i];
+    }
+    assert(sum == recvBuf.size());
+  }
+
+  // now do the MPI_Alltoallv to transfer the data
+  MPI_Alltoallv(/*sendbuf*/ &sendBuf[0],
+                /*sendcounts*/ &sendCounts[0],
+                /*sdispls*/ &sendDisplacements[0],
+                dt,
+                /*recvbuf*/ &recvBuf[0],
+                /*recvcounts*/ &recvCounts[0],
+                /*rdispls*/ &recvDisplacements[0],
+                dt,
+                MPI_COMM_WORLD);
+}
+
+void copyCountsToGlobalCounts(counts_array_t& localCounts,
+                              DistributedArray<int64_t>& GlobalCounts) {
+  int myRank = 0;
+  int numRanks = 0;
+  MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
+  MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
+ 
+  // create some buffers to help compute the transposition
+
+  // how many to send to each destination rank?
+  std::vector<int> sendCounts;
+  sendCounts.resize(numRanks, 0);
+
+  // what to send
+  std::vector<CountBufElt> sendBuf;
+  sendBuf.resize(COUNTS_SIZE);
+
+  // space for receiving
+  std::vector<CountBufElt> recvBuf;
+  recvBuf.resize(COUNTS_SIZE);
+
+  // fill in sendBuf and count the number for each destination
+  for (int64_t i = 0; i < COUNTS_SIZE; i++) {
+    int64_t dstGlobalIdx = i*numRanks + myRank;
+    auto dst = GlobalCounts.globalIdxToLocalIdx(dstGlobalIdx);
+    assert(0 <= dst.rank && dst.rank < numRanks);
+    sendCounts[dst.rank]++;
+    CountBufElt c;
+    c.digit = i;
+    c.rank = myRank;
+    c.count = localCounts[i];
+    sendBuf[i] = c;
+  }
+
+  // use myMpiAllToAllV to communicate the elements in sendBuf to recvBuf.
+  myMpiAllToAllV(sendBuf, sendCounts, recvBuf, gCountBufEltMpiType);
+
+  // now recvBuf contains the count data from other nodes,
+  // but it isn't yet sorted correctly.
+  // Sort it according to digit, breaking ties by rank.
+  std::sort(recvBuf.begin(), recvBuf.end(),
+            [](const CountBufElt& a, const CountBufElt& b) {
+                if (a.digit != b.digit) {
+                  return a.digit < b.digit;
+                }
+                return a.rank < b.rank;
+            });
+
+  // now store from recvBuf into GlobalCounts
+  for (int64_t i = 0; i < COUNTS_SIZE; i++) {
+    CountBufElt elt = recvBuf[i];
+    int64_t globalIdx = elt.digit * numRanks + elt.rank;
+    auto p = GlobalCounts.globalIdxToLocalIdx(globalIdx);
+    assert(p.rank == myRank);
+    GlobalCounts.localPart()[p.locIdx] = elt.count;
   }
 }
 
-void globalShuffle(std::vector<SortElement>& A,
-                   std::vector<SortElement>& B,
+void exclusiveScan(const DistributedArray<int64_t>& Src,
+                   DistributedArray<int64_t>& Dst) {
+  int myRank = 0;
+  int numRanks = 0;
+  MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
+  MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
+ 
+  // Now compute the total of for each chunk of the global src array
+  int64_t myTotal = 0;
+  for (int64_t i = 0; i < Src.numElementsHere(); i++) {
+    myTotal += Src.localPart()[i];
+  }
+
+  // Now use MPI_Scan to add up the totals from each rank
+  int64_t myGlobalStart = 0;
+  assert(sizeof(int64_t) == sizeof(long long));
+  MPI_Exscan(&myTotal, &myGlobalStart, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+
+  if (myRank == 0) {
+    myGlobalStart = 0; // MPI_Exscan leaves result on rank 0 undefined
+  }
+
+  {
+    int64_t sum = myGlobalStart; 
+    for (int64_t i = 0; i < Dst.numElementsHere(); i++) {
+      Dst.localPart()[i] = sum;
+      sum += Src.localPart()[i];
+    }
+  }
+}
+
+void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
+                                counts_array_t& localStarts) {
+  int myRank = 0;
+  int numRanks = 0;
+  MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
+  MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
+ 
+  // create some buffers to help compute the transposition
+
+  // how many to send to each destination rank?
+  std::vector<int> sendCounts;
+  sendCounts.resize(numRanks, 0);
+
+  // what to send
+  std::vector<CountBufElt> sendBuf;
+  sendBuf.resize(COUNTS_SIZE);
+
+  // space for receiving
+  std::vector<CountBufElt> recvBuf;
+  recvBuf.resize(COUNTS_SIZE);
+
+  // fill in sendBuf and count the number for each destination
+  for (int64_t i = 0; i < GlobalStarts.numElementsHere(); i++) {
+    int64_t globalIdx = GlobalStarts.localIdxToGlobalIdx(i);
+    int64_t digit = globalIdx / numRanks;
+    int64_t rank = globalIdx - digit*numRanks;
+    assert(0 <= digit && digit < COUNTS_SIZE);
+    assert(0 <= rank && rank < numRanks);
+    sendCounts[rank]++;
+    CountBufElt c;
+    c.digit = digit;
+    c.rank = rank;
+    c.count = GlobalStarts.localPart()[i];
+    sendBuf[i] = c;
+  }
+
+  // sort sendBuf according to destination rank and then by digit
+  std::sort(sendBuf.begin(), sendBuf.end(),
+            [](const CountBufElt& a, const CountBufElt& b) {
+                if (a.rank != b.rank) {
+                  return a.rank < b.rank;
+                }
+                return a.digit < b.digit;
+            });
+
+  // use myMpiAllToAllV to communicate the elements in sendBuf to recvBuf.
+  myMpiAllToAllV(sendBuf, sendCounts, recvBuf, gCountBufEltMpiType);
+
+  // now recvBuf contains the count data from other nodes,
+  // but it isn't yet sorted correctly.
+  // Sort it according to digit
+  std::sort(recvBuf.begin(), recvBuf.end(),
+            [](const CountBufElt& a, const CountBufElt& b) {
+                return a.digit < b.digit;
+            });
+
+  // now store from recvBuf into localCounts
+  for (int64_t i = 0; i < COUNTS_SIZE; i++) {
+    CountBufElt elt = recvBuf[i];
+    assert(elt.rank == myRank);
+    assert(elt.digit == i);
+    localStarts[i] = elt.count;
+  }
+}
+
+void globalShuffle(DistributedArray<SortElement>& A,
+                   DistributedArray<SortElement>& B,
                    int digit) {
   int myRank = 0;
   int numRanks = 0;
@@ -97,7 +483,9 @@ void globalShuffle(std::vector<SortElement>& A,
   auto starts = std::make_unique<counts_array_t>();
   auto counts = std::make_unique<counts_array_t>();
 
-  localShuffle(A, B, *starts, *counts, n, digit);
+  // Shuffle the data from A into B
+  // the data in B will be sorted by the current digit
+  localShuffle(A.localPart(), B.localPart(), *starts, *counts, digit);
 
   // Now, each rank has an array of counts, like this
   //  [r0d0, r0d1, ... r0d255]  | on rank 0
@@ -112,120 +500,81 @@ void globalShuffle(std::vector<SortElement>& A,
   //  [r0d2, r1d2, r2d2, ...]   | on rank 1 ...
   //  ...
 
-  // Conceptually, create a distributed array storing this transposition.
-  int64_t globCountsPerNode = divCeil(COUNTS_SIZE*numRanks, numRanks);
-  std::vector<int64_t> GlobalCounts;
-  GlobalCounts.resize(globCountsPerNode);
+  // create a distributed array storing the result of this transposition
+  auto GlobalCounts = DistributedArray<int64_t>::create("GlobalCounts",
+                                                        COUNTS_SIZE*numRanks);
+  // and one storing the start positions for each task
+  // (that will be the result of a scan operation)
+  auto GlobalStarts = DistributedArray<int64_t>::create("GlobalStarts",
+                                                        COUNTS_SIZE*numRanks);
 
-  // And a distributed array storing the CountBufElt type.
-  std::vector<CountBufElt> recvBuf;
-  recvBuf.resize(globCountsPerNode);
+  // copy the per-bucket counts to the global counts array
+  copyCountsToGlobalCounts(*counts, GlobalCounts);
 
-  // Prepare for MPI_AllToAllv
-  std::vector<int> sendCounts, sendDisplacements, recvCounts, recvDisplacements;
-  sendCounts.resize(numRanks);
-  sendDisplacements.resize(numRanks);
-  recvCounts.resize(numRanks);
-  recvDisplacements.resize(numRanks);
-  std::vector<CountBufElt> sendBuf;
-  sendBuf.resize(COUNTS_SIZE);
-  int rankCount = 0;
-  int rankStart = 0;
-  int lastRank = -1;
-  for (int i = 0; i < COUNTS_SIZE; i++) {
-    int dstRank = i / globCountsPerNode;
-    sendCounts[dstRank]++;
-    CountBufElt c;
-    c.digit = i;
-    c.rank = myRank;
-    c.count = counts[i];
-    sendBuf[i] = c;
-  }
-  // compute sendDisplacements
+  // scan to fill in GlobalStarts
+  exclusiveScan(GlobalCounts, GlobalStarts);
+
+  // copy the per-bucket starts from the global counts array
+  copyStartsFromGlobalStarts(GlobalStarts, *starts);
+
+  // Now go through the data in B assigning each element its final
+  // position and sending that data to the other ranks
+  // Leave the result in A
   {
-    int sum = 0;
-    for (int i = 0; i < numRanks; i++) {
-      sendDisplacements[i] = sum;
-      sum += sendCounts[i];
+    // how many to send to each destination rank?
+    std::vector<int> sendCounts;
+    sendCounts.resize(numRanks, 0);
+
+    int64_t numHere = B.numElementsHere();
+
+    // what to send
+    std::vector<ShuffleBufSortElement> sendBuf;
+    sendBuf.resize(numHere);
+
+    // space for receiving
+    std::vector<ShuffleBufSortElement> recvBuf;
+    recvBuf.resize(numHere);
+
+    // fill in sendBuf and count the number for each destination
+    for (int64_t i = 0; i < numHere; i++) {
+      SortElement elt = B.localPart()[i];
+      int bucket = getBucket(elt, digit);
+      // what will be the destination index?
+      int64_t &next = (*starts)[bucket];
+      int64_t dstGlobalIdx = next;
+      next += 1;
+      auto dst = B.globalIdxToLocalIdx(dstGlobalIdx);
+      sendCounts[dst.rank]++;
+      ShuffleBufSortElement e;
+      e.key = elt.key;
+      e.val = elt.val;
+      e.dstGlobalIdx = dstGlobalIdx;
+      sendBuf[i] = e;
+    }
+
+    // use myMpiAllToAllV to communicate the elements in sendBuf to recvBuf.
+    myMpiAllToAllV(sendBuf, sendCounts, recvBuf, gShuffleBufSortElementMpiType);
+
+    // Now recvBuf contains the elements from other nodes,
+    // but these aren't yet in the correct locations.
+    // Store them into A according to dstGlobalIdx
+    for (int64_t i = 0; i < numHere; i++) {
+      ShuffleBufSortElement e = recvBuf[i];
+      auto dst = B.globalIdxToLocalIdx(e.dstGlobalIdx);
+      assert(dst.rank == myRank);
+      SortElement& elt = A.localPart()[dst.locIdx];
+      elt.key = e.key;
+      elt.val = e.val;
     }
   }
+}
 
-  // Dissemenate the counts to send to each node
-  // for use in recvCounts
-  {
-    std::vector<int> tmpDspl, tmpCounts;
-    tmpDspl.resize(numRanks);
-    tmpCounts.resize(numRanks);
-    for (int i = 0; i < numRanks; i++) {
-      tmpDspl[i] = i;
-      tmpCounts[i] = 1;
-    }
-    MPI_Alltoallv(/*sendbuf*/ &sendCounts[0],
-                  /*sendcounts*/ &tmpCounts[0],
-                  /*sdispls*/ &tmpDspl[0],
-                  MPI_INT,
-                  /*recvbuf*/ &recvCounts[0],
-                  /*recvcounts*/ &tmpCounts[0],
-                  /*rdispls*/ &tmpDspl[0],
-                  MPI_INT,
-                  MPI_COMM_WORLD);
-    // compute recvDisplacements
-    int sum = 0;
-    for (int i = 0; i < numRanks; i++) {
-      recvDisplacements[i] = sum;
-      sum += recvCounts[i];
-    }
+// Sort the data in A, using B as scratch space.
+void mySort(DistributedArray<SortElement>& A,
+            DistributedArray<SortElement>& B) {
+  for (int digit = 0; digit < N_DIGITS; digit++) {
+    globalShuffle(A, B, digit);
   }
-
-  // send the counts, which won't be in the right order yet
-  MPI_Alltoallv(/*sendbuf*/ &sendBuf[0],
-                /*sendcounts*/ &sendCounts[0],
-                /*sdispls*/ &sendDisplacements[0],
-                gCountBufEltMpiType,
-                /*recvbuf*/ &recvBuf[0],
-                /*recvcounts*/ &recvCounts[0],
-                /*rdispls*/ &recvDisplacements[0],
-                gCountBufEltMpiType,
-                MPI_COMM_WORLD);
-
-  // now sort recvBuf according to digit
-  std::sort(recvBuf.begin(), recvBuf.end(),
-            [](const CountBufElt& a, const CountBufElt& b) {
-                if a.digit != b.digit {
-                  return a.digit < b.digit;
-                }
-                return a.rank < b.rank;
-            });
-
-  // now store from recvBuf into the global counts array C
-  for (int64_t i = 0; i < globCountsPerNode; i++) {
-    CountBufElt elt = recvBuf[i];
-    int64_t globalIdx = elt.digit * numRanks + elt.rank;
-    assert(globalIdx == myRank*globCountsPerNode + i);
-    GlobalCounts[i] = elt.count;
-  }
-
-  // Now compute the total of the counts for each chunk of the global
-  // counts array
-  int64_t myTotalCount = 0;
-  for (int64_t i = 0; i < globCountsPerNode; i++) {
-    myTotalCount += GlobalCounts[i];
-  }
-
-  // Now use MPI_Scan to add up the total counts from each rank
-  int64_t myGlobalStart = 0;
-  MPI_Scan(&myTotalCount, &myGlobalStart, 1, MPI_LONG_LONG);
-
-  // Now compute the global starts
-  std::vector<int64_t> GlobalStarts;
-  GlobalStarts.resize(globCountsPerNode);
-
-  for (int64_t i = 0; i < globCountsPerNode; i++) {
-    GlobalStarts[i] = myGlobalSTart;
-    myGlobalStart += GlobalCounts[i];
-  }
-
-  // Now partition the data according to GlobalStarts
 }
 
 int main(int argc, char *argv[]) {
@@ -245,11 +594,12 @@ int main(int argc, char *argv[]) {
   MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
  
   if (myRank == 0) {
-    printf("Total number of MPI ranks: %i\n", numRanks);
-    printf("Problem size: %lli\n", (long long int) n);
+    std::cout << "Total number of MPI ranks: " << numRanks << "\n";
+    std::cout << "Problem size: " << n << "\n";
+    flushOutput();
   }
 
-  // setup the global type
+  // setup the global types
   assert(sizeof(unsigned long long) == sizeof(uint64_t));
   assert(2*sizeof(unsigned long long) == sizeof(SortElement));
   MPI_Type_contiguous(2, MPI_UNSIGNED_LONG_LONG, &gSortElementMpiType);
@@ -257,33 +607,28 @@ int main(int argc, char *argv[]) {
   assert(2*sizeof(unsigned long long) == sizeof(CountBufElt));
   MPI_Type_contiguous(2, MPI_UNSIGNED_LONG_LONG, &gCountBufEltMpiType);
   MPI_Type_commit(&gCountBufEltMpiType);
+  assert(3*sizeof(unsigned long long) == sizeof(ShuffleBufSortElement));
+  MPI_Type_contiguous(3, MPI_UNSIGNED_LONG_LONG, &gShuffleBufSortElementMpiType);
+  MPI_Type_commit(&gShuffleBufSortElementMpiType);
 
-  // create a "distributed array" in the form of different allocations
-  // on each node.
-  int64_t perNode = divCeil(n, numRanks);
-  int64_t myChunkSize = perNode;
-  if (perNode*myRank + myChunkSize > n) {
-    myChunkSize = n - perNode*myRank;
-    if (myChunkSize < 0) myChunkSize = 0;
-  }
 
-  std::vector<SortElement> A;
-  A.resize(myChunkSize);
-  std::vector<SortElement> B;
-  B.resize(myChunkSize);
- 
-  // set up the values to random values and the indices to global indices
+  // create distributed arrays A and B
+  auto A = DistributedArray<SortElement>::create("A", n);
+  auto B = DistributedArray<SortElement>::create("B", n);
+
+  // set the keys to random values and the values to global indices
   {
     auto start = std::chrono::steady_clock::now();
     if (myRank == 0) {
-      printf("Generating random values\n");
+      std::cout << "Generating random values\n";
+      flushOutput();
     }
 
     auto rng = pcg64(myRank);
-    int64_t i = perNode * myRank;
-    for (auto& elt : A) {
+    int64_t i = 0;
+    for (auto& elt : A.localPart()) {
       elt.key = rng();
-      elt.val = i;
+      elt.val = A.localIdxToGlobalIdx(i);
       i++;
     }
 
@@ -291,53 +636,42 @@ int main(int argc, char *argv[]) {
     auto end = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed = end - start;
     if (myRank == 0) {
-      printf("Generated random values in %lf s\n", elapsed.count());
+      std::cout << "Generated random values in " << elapsed.count() << " s\n";
+      flushOutput();
     }
     MPI_Barrier(MPI_COMM_WORLD);
   }
 
+  // Print out the first few elements on each locale
+  A.print(10);
+
   // Shuffle the data in-place to sort by the current digit
   {
-    auto start = std::chrono::steady_clock::now();
     if (myRank == 0) {
-      printf("Sorting (TODO)\n");
-
-      // MPI_Scan
-
-      // MPI_Alltoallv
+      std::cout << "Sorting\n";
+      flushOutput();
     }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    auto start = std::chrono::steady_clock::now();
+
+    mySort(A, B);
 
     MPI_Barrier(MPI_COMM_WORLD);
     auto end = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed = end - start;
     if (myRank == 0) {
-      printf("Sorted %lli values in %lf s\n",
-             (long long int) n, elapsed.count());
+      std::cout << "Sorted " << n << " values in " << elapsed.count() << "\n";;
+      std::cout << "That's " << n/elapsed.count()/1000.0/1000.0
+                << " M elements sorted / s\n";
+      flushOutput();
     }
     MPI_Barrier(MPI_COMM_WORLD);
   }
  
   // Print out the first few elements on each locale
-  size_t nToPrint = 10;
-  if (myRank == 0) {
-    printf("Displaying first %i elements on each rank\n", (int)nToPrint);
-  }
-  for (int rank = 0; rank < numRanks; rank++) {
-    if (myRank == rank) {
-      for (size_t i = 0; i < nToPrint && i < A.size; i++) {
-        printf("A[%lli] = (%016llx,%llu)\n",
-               (long long int) (myRank*perNode + i),
-               (long long unsigned) A[i].key,
-               (long long unsigned) A[i].val);
-      }
-      printf("...\n");
-    }
-    MPI_Barrier(MPI_COMM_WORLD);
-  }
+  A.print(10);
 
   MPI_Finalize();
   return 0;
 }
-
-// NOTE: To understand the Teuchos and Tpetra code, see the Teuchos and Tpetra
-// Doxygen documentation online.
