@@ -43,6 +43,9 @@ std::ostream& operator<<(std::ostream& os, const SortElement& x) {
   os << "," << x.val << ")";
   return os;
 }
+bool operator==(const SortElement& x, const SortElement& y) {
+  return x.key == y.key && x.val == y.val;
+}
 static MPI_Datatype gSortElementMpiType;
 
 // to help in communicating the counts
@@ -137,7 +140,7 @@ DistributedArray<EltType>::create(std::string name, int64_t totalNumElements) {
   int numRanks = 0;
   MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
   MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
- 
+
   int64_t eltsPerRank = divCeil(totalNumElements, numRanks);
   int64_t eltsHere = eltsPerRank;
   if (eltsPerRank*myRank + eltsHere > totalNumElements) {
@@ -147,7 +150,7 @@ DistributedArray<EltType>::create(std::string name, int64_t totalNumElements) {
 
   DistributedArray<EltType> ret;
   ret.name_ = std::move(name);
-  ret.localPart_.resize(eltsHere);
+  ret.localPart_.resize(eltsPerRank);
   ret.numElementsTotal_ = totalNumElements;
   ret.numElementsPerRank_ = eltsPerRank;
   ret.numElementsHere_ = eltsHere;
@@ -211,7 +214,8 @@ void localShuffle(std::vector<SortElement>& A,
                   std::vector<SortElement>& B,
                   counts_array_t& starts,
                   counts_array_t& counts,
-                  int digit) {
+                  int digit,
+                  int64_t n) {
   assert(A.size() == B.size());
 
   // clear out starts and counts
@@ -219,7 +223,8 @@ void localShuffle(std::vector<SortElement>& A,
   counts.fill(0);
 
   // compute the count for each digit
-  for (SortElement elt : A) {
+  for (int64_t i = 0; i < n; i++) {
+    SortElement elt = A[i];
     counts[getBucket(elt, digit)] += 1;
   }
 
@@ -233,7 +238,8 @@ void localShuffle(std::vector<SortElement>& A,
   }
 
   // shuffle the data
-  for (SortElement elt : A) {
+  for (int64_t i = 0; i < n; i++) {
+    SortElement elt = A[i];
     int64_t &next = starts[getBucket(elt, digit)];
     B[next] = elt;
     next += 1;
@@ -248,7 +254,7 @@ void localShuffle(std::vector<SortElement>& A,
 //     elements must contiguous in sendBuf.
 //   * automatically computes send displacements, recv counts, and recv
 //     displacements
-template<typename T> 
+template<typename T>
 void myMpiAllToAllV(const std::vector<T>& sendBuf,
                     const std::vector<int>& sendCounts,
                     std::vector<T>& recvBuf,
@@ -324,7 +330,7 @@ void copyCountsToGlobalCounts(counts_array_t& localCounts,
   int numRanks = 0;
   MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
   MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
- 
+
   // create some buffers to help compute the transposition
 
   // how many to send to each destination rank?
@@ -382,7 +388,7 @@ void exclusiveScan(const DistributedArray<int64_t>& Src,
   int numRanks = 0;
   MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
   MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
- 
+
   // Now compute the total of for each chunk of the global src array
   int64_t myTotal = 0;
   for (int64_t i = 0; i < Src.numElementsHere(); i++) {
@@ -399,7 +405,7 @@ void exclusiveScan(const DistributedArray<int64_t>& Src,
   }
 
   {
-    int64_t sum = myGlobalStart; 
+    int64_t sum = myGlobalStart;
     for (int64_t i = 0; i < Dst.numElementsHere(); i++) {
       Dst.localPart()[i] = sum;
       sum += Src.localPart()[i];
@@ -413,7 +419,7 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
   int numRanks = 0;
   MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
   MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
- 
+
   // create some buffers to help compute the transposition
 
   // how many to send to each destination rank?
@@ -479,13 +485,14 @@ void globalShuffle(DistributedArray<SortElement>& A,
   int numRanks = 0;
   MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
   MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
- 
+
   auto starts = std::make_unique<counts_array_t>();
   auto counts = std::make_unique<counts_array_t>();
 
   // Shuffle the data from A into B
   // the data in B will be sorted by the current digit
-  localShuffle(A.localPart(), B.localPart(), *starts, *counts, digit);
+  localShuffle(A.localPart(), B.localPart(), *starts, *counts, digit,
+               A.numElementsHere());
 
   // Now, each rank has an array of counts, like this
   //  [r0d0, r0d1, ... r0d255]  | on rank 0
@@ -496,7 +503,7 @@ void globalShuffle(DistributedArray<SortElement>& A,
   // We need to transpose these so that the counts have the
   // starting digits first
   //  [r0d0, r1d0, r2d0, ...]   | on rank 0
-  //  [r0d1, r1d1, r2d1, ...]   | 
+  //  [r0d1, r1d1, r2d1, ...]   |
   //  [r0d2, r1d2, r2d2, ...]   | on rank 1 ...
   //  ...
 
@@ -582,21 +589,32 @@ int main(int argc, char *argv[]) {
 
   // read in the problem size
   bool printSome = false;
+  bool verifyLocally = false;
+  bool verifyLocallySet = false;
   int64_t n = 100*1000*1000;
   for (int i = 1; i < argc; i++) {
     if (std::string(argv[i]) == "--n") {
       n = std::stoll(argv[++i]);
     } else if (std::string(argv[i]) == "--print") {
       printSome = true;
+    } else if (std::string(argv[i]) == "--verify") {
+      verifyLocally = true;
+      verifyLocallySet = true;
+    } else if (std::string(argv[i]) == "--no-verify") {
+      verifyLocally = false;
+      verifyLocallySet = true;
     }
+  }
 
+  if (!verifyLocallySet) {
+    verifyLocally = (n < 128*1024*1024);
   }
 
   int myRank = 0;
   int numRanks = 0;
   MPI_Comm_rank (MPI_COMM_WORLD, &myRank);
   MPI_Comm_size (MPI_COMM_WORLD, &numRanks);
- 
+
   if (myRank == 0) {
     std::cout << "Total number of MPI ranks: " << numRanks << "\n";
     std::cout << "Problem size: " << n << "\n";
@@ -619,6 +637,7 @@ int main(int argc, char *argv[]) {
   // create distributed arrays A and B
   auto A = DistributedArray<SortElement>::create("A", n);
   auto B = DistributedArray<SortElement>::create("B", n);
+  std::vector<SortElement> LocalInputCopy;
 
   // set the keys to random values and the values to global indices
   {
@@ -651,6 +670,14 @@ int main(int argc, char *argv[]) {
     A.print(10);
   }
 
+  if (verifyLocally) {
+    // save the input to the sorting problem
+    LocalInputCopy.resize(numRanks*A.numElementsPerRank());
+    MPI_Gather(& A.localPart()[0], A.numElementsPerRank(), gSortElementMpiType,
+               & LocalInputCopy[0], A.numElementsPerRank(),
+               gSortElementMpiType, 0, MPI_COMM_WORLD);
+  }
+
   // Shuffle the data in-place to sort by the current digit
   {
     if (myRank == 0) {
@@ -674,10 +701,38 @@ int main(int argc, char *argv[]) {
     }
     MPI_Barrier(MPI_COMM_WORLD);
   }
- 
+
   // Print out the first few elements on each locale
   if (printSome) {
     A.print(10);
+  }
+
+  if (verifyLocally) {
+    // gather the output from sorting
+    std::vector<SortElement> LocalOutputCopy;
+    LocalOutputCopy.resize(numRanks*A.numElementsPerRank());
+    MPI_Gather(& A.localPart()[0], A.numElementsPerRank(), gSortElementMpiType,
+               & LocalOutputCopy[0], A.numElementsPerRank(),
+               gSortElementMpiType, 0, MPI_COMM_WORLD);
+
+    if (myRank == 0) {
+      auto LocalSorted = LocalInputCopy;
+      std::stable_sort(LocalSorted.begin(), LocalSorted.begin() + n,
+                       [](const SortElement& a, const SortElement& b) {
+                           return a.key < b.key;
+                       });
+
+      bool failures = false;
+      for (int64_t i = 0; i < n; i++) {
+        if (! (LocalSorted[i] == LocalOutputCopy[i])) {
+          std::cout << "Sorted element " << i << " did not match\n";
+          std::cout << "Expected: " << LocalSorted[i] << "\n";
+          std::cout << "Got:      " << LocalOutputCopy[i] << "\n";
+          failures = true;
+        }
+      }
+      assert(!failures);
+    }
   }
 
   MPI_Finalize();
