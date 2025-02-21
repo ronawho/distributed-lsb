@@ -19,10 +19,10 @@
 // raise exeptions.
 
 // TODO: put this back to 16 after it is working
-#define RADIX 4
+#define RADIX 16
 #define N_DIGITS (64/RADIX)
 #define N_BUCKETS (1 << RADIX)
-#define COUNTS_SIZE (N_BUCKETS + 1)
+#define COUNTS_SIZE (N_BUCKETS)
 #define MASK (N_BUCKETS - 1)
 using counts_array_t = std::array<int64_t, COUNTS_SIZE>;
 
@@ -203,6 +203,45 @@ void DistributedArray<EltType>::print(int64_t nToPrintPerRank) const {
   }
 }
 
+template<typename T>
+void printAllLocalElts(const T* elts,
+                       int64_t nEltsPerRank,
+                       const char* name,
+                       int64_t nToPrintPerRank) {
+  int myRank = 0;
+  int numRanks = 0;
+  myRank = shmem_my_pe();
+  numRanks = shmem_n_pes();
+
+  shmem_barrier_all();
+
+  if (myRank == 0) {
+    if (nToPrintPerRank >= nEltsPerRank) {
+      std::cout << name << ": displaying all "
+                << nEltsPerRank << " elements per rank\n";
+    } else {
+      std::cout << name << ": displaying first " << nToPrintPerRank
+                << " elements on each rank"
+                << " out of " << nEltsPerRank << " elements per rank\n";
+    }
+  }
+
+  for (int rank = 0; rank < numRanks; rank++) {
+    if (myRank == rank) {
+      int64_t i = 0;
+      for (i = 0; i < nToPrintPerRank && i < nEltsPerRank; i++) {
+        std::cout << name << "(rank " << rank << ") [" << i << "] = " << elts[i] << "\n";
+      }
+      if (i < nEltsPerRank) {
+        std::cout << "...\n";
+      }
+      flushOutput();
+    }
+    shmem_barrier_all();
+  }
+}
+
+
 // compute the bucket for a value when sort is on digit 'd'
 inline int getBucket(SortElement x, int d) {
   return (x.key >> (RADIX*d)) & MASK;
@@ -297,8 +336,8 @@ void copyCountsToGlobalCounts(counts_array_t& localCounts,
 
     int64_t* GCA = &GlobalCounts.localPart()[0]; // it's symmetric
 
-    shmem_int64_iput( GCA + dst.locIdx, // region on the remote PE
-                      &localCounts[i],  // region on the local PE
+    shmem_int64_iput( GCA + dst.locIdx, // dst region on the remote PE
+                      &localCounts[i],  // src region on the local PE
                       numRanks,         // stride for destination array
                       1,                // stride for source array
                       nToSameRank,      // number of elements
@@ -392,7 +431,7 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
     int srcRank = src.rank;
     int nToSameRank = 0;
     while (i+nToSameRank < COUNTS_SIZE) {
-      int64_t ii = i*numRanks + myRank;
+      int64_t ii = (i+nToSameRank)*numRanks + myRank;
       int nextRank = GlobalStarts.globalIdxToLocalIdx(ii).rank;
       if (nextRank != srcRank) {
         break;
@@ -403,8 +442,8 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
 
     int64_t* GSA = GlobalStarts.localPart(); // it's symmetric
 
-    shmem_int64_iget(  &localStarts[i],  // region on the local PE
-                       GSA + src.locIdx, // region on the remote PE
+    shmem_int64_iget(  &localStarts[i],  // dst region on the local PE
+                       GSA + src.locIdx, // src region on the remote PE
                        1,                // stride for destination array
                        numRanks,         // stride for source array
                        nToSameRank,      // number of elements
@@ -466,8 +505,8 @@ void globalShuffle(DistributedArray<SortElement>& A,
   // copy the per-bucket counts to the global counts array
   copyCountsToGlobalCounts(*counts, GlobalCounts);
 
-  if (myRank == 0) std::cout << "GlobalCounts\n";
-  GlobalCounts.print(100);
+  //printAllLocalElts(&(*counts)[0], COUNTS_SIZE, "LocCounts", 100);
+  //GlobalCounts.print(100);
 
   // scan to fill in GlobalStarts
   exclusiveScan(GlobalCounts, GlobalStarts);
@@ -475,8 +514,8 @@ void globalShuffle(DistributedArray<SortElement>& A,
   // copy the per-bucket starts from the global counts array
   copyStartsFromGlobalStarts(GlobalStarts, *starts);
 
-  if (myRank == 0) std::cout << "GlobalStarts\n";
-  GlobalStarts.print(100);
+  //GlobalStarts.print(100);
+  //printAllLocalElts(&(*starts)[0], COUNTS_SIZE, "LocStarts", 100);
 
   // Now go through the data in B assigning each element its final
   // position and sending that data to the other ranks
@@ -506,13 +545,16 @@ void mySort(DistributedArray<SortElement>& A,
 
   assert(N_DIGITS % 2 == 0);
   for (int digit = 0; digit < N_DIGITS; digit += 2) {
-    if (myRank == 0) std::cout << "Digit " << digit << " input:\n";
-    A.print(10);
+    //if (myRank == 0) std::cout << "Digit " << digit << " input:\n";
+    //A.print(10);
     globalShuffle(A, B, digit);
-    if (myRank == 0) std::cout << "Digit " << digit << " output:\n";
-    B.print(10);
+    //if (myRank == 0) std::cout << "Digit " << digit+1 << " input:\n";
+    //B.print(10);
     globalShuffle(B, A, digit+1);
   }
+
+  //if (myRank == 0) std::cout << "Sorted Output\n";
+  //A.print(10);
 }
 
 int main(int argc, char *argv[]) {
@@ -654,6 +696,9 @@ int main(int argc, char *argv[]) {
       assert(!failures);
     }
   }*/
+
+  // this seems to cause crashes/hangs with openmpi shmem / osss-ucx
+  //shmem_finalize();
 
   return 0;
 }
