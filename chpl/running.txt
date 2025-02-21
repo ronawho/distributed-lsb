@@ -1,0 +1,5 @@
+# eg to run on 4 nodes / simulate 4 nodes
+./arkouda-radix-sort -nl 4
+
+# specifying problem size
+./arkouda-radix-sort -nl 4 --n=100

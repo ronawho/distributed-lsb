@@ -1,0 +1,5 @@
+mpirun can launch it for local testing, e.g.
+
+mpirun -n 4 ./mpi_lsbsort --n 100
+mpirun -n 4 ./mpi_lsbsort --n 100 --print
+
