@@ -1,10 +1,21 @@
-# Comparing Programming Tools with Distributed Radix Sorting
+# Comparing Frameworks with Distributed Radix Sorting
 
 This repository contains code for doing a distributed parallel
 least-significant-digit-first (LSD) radix sort with several
 distributed-memory parallel programming frameworks. These implementations
 support comparisons of these different frameworks and their productivity
 and performance.
+
+As of Feb 2025, here are the performance results:
+
+| Variant     | Performance | Lines of Code |
+| ---         | ---         | ---           |
+| chapel      | 6524        | 189           |
+| mpi         | 830         | 740           |
+| shmem       | 1874        | 704           |
+
+PRs contributing improved versions or implementations in other
+distributed-memory parallel programming frameworks are welcome!
 
 ## What is LSD Radix Sort?
 
@@ -21,6 +32,22 @@ digit).  It proceeds in this way until all the digits have been sorted.
 Each of these passes has to be stable; that is, it does not change the
 order of equal elements (in this case, that is elements with the same
 current digit).
+
+A parallel LSD radix sort has the following outline:
+
+* Create arrays `A` and `B` of total size `n`
+  * Arrays `A` and `B` store elements evenly among tasks
+* for each digit, starting with the least significant, shuffle the data
+  by that digit:
+  * Each task counts the number of elements with each digit among its
+    elements in `A`
+  * Collect the counts of digits into a global array, in digit order
+  * Perform a parallel prefix sum on that global array to compute the
+    output range from each task
+  *  Each task copies the elements in its portion of `A` into the
+     appropriate output portion of `B`
+  * swap arrays `A` and `B` if it is not the last digit
+
 
 ## What is a Distributed-Memory Parallel Programming Framework?
 
@@ -55,17 +82,20 @@ you'll be using thousands or millions of cores.
 
 ## Which Frameworks?
 
-There is a directory in this repository for each framework.
+There is a directory in this repository for each framework. See the
+README in each directory for details on how to compile and run these and
+on the software versions measured.
 
 ### Chapel
 
 [Chapel](https://chapel-lang.org/) is a programming language designed for
 parallel computing, including distributed-memory parallel computing.
 
-### Dask
-
-[Dask](https://www.dask.org/) is a Python framework for parallel
-computing.
+The Chapel LSD Radix sort is implemented using Block-distributed arrays
+and `coforall` + `on` statements to create work on different nodes, and
+`coforall` statements to use multiple cores on each node. It uses
+[aggregators](https://chapel-lang.org/docs/modules/packages/CopyAggregation.html)
+to avoid small messages.
 
 ### MPI
 
@@ -77,7 +107,30 @@ MPI is standardized by the [MPI Forum](https://www.mpi-forum.org/) and
 the most common implementations are [MPICH](https://www.mpich.org/) and
 [OpenMPI](https://www.open-mpi.org/) or derivatives of these.
 
+The MPI LSD Radix sort here uses C++'s `std::vector` to store the portion
+of the array per-rank. It uses a `struct DistributedArray` abstraction to
+make it clearer what operations apply to distributed (rather than local)
+arrays and to make it more readable to go between global indices and
+local indices. In each shuffle step, it stably sorts the local data by
+the digit. It uses `MPI_Alltoallv` to communicate counts between the
+global counts arrays and the local counts arrays and to shuffle the data.
+One challenge with that is that, while the algorithm computes what to
+send to each other node, it doesn't directly compute how much to receive
+from each other node, so it does a preparatory `MPI_Alltoallv` to share
+that information.
+
+
 ### OpenSHMEM
 
 [OpenSHMEM](http://openshmem.org/) is a library for one-sided
 communication.
+
+Similarly to the MPI version, the OpenSHMEM LSD Radix sort here uses
+C++'s `std::vector` to store the portion of the array per-rank and a
+`struct DistributedArray` abstraction to make it clearer what operations
+apply to distributed (rather than local) arrays and to make it more
+readable to go between global indices and local indices. In each shuffle
+step, it stably sorts the local data by the digit. It uses the strided
+`iput` and `iget` functions to copy counts data between global counts
+arrays and local counts arrays. It uses `shmem_putmem` copy the array
+elements.

@@ -1,6 +1,0 @@
-oshrun can launch it for local testing
-
-oshrun -np 3 ./shmem_lsbsort --n 100
-oshrun -np 3 ./shmem_lsbsort --n 100 --print
-
-
