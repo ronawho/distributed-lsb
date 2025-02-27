@@ -8,10 +8,10 @@ and performance.
 
 ## What is LSD Radix Sort?
 
-[Least Significant Digit Radix Sort] [1] (or LSD Radix Sort) is a
-linear-time sort algorithm. It is theoretically efficient and relatively
-simple to implement. Because of its simplicity, it is practical to
-explore many implementations of it.
+[Least Significant Digit Radix Sort](https://en.wikipedia.org/wiki/Radix_sort)
+(or LSD Radix Sort) is a linear-time sort algorithm. It is theoretically
+efficient and relatively simple to implement. Because of its simplicity,
+it is practical to explore many implementations of it.
 
 LSD Radix Sort operates in passes. Each pass stably sorts by one digit of
 the data to be sorted. The first pass sorts the data by the least
@@ -25,10 +25,11 @@ current digit).
 ## What is a Distributed-Memory Parallel Programming Framework?
 
 A distributed-memory parallel programming framework is a programming
-system that supports programs that run on a supercomputer [2] or cluster
-computer [3]. It is called "distributed memory" because the supercomputer
-or cluster is made up of individual nodes and each node has its own
-memory.
+system that supports programs that run on a
+[supercomputer](https://en.wikipedia.org/wiki/Supercomputer)
+or [cluster computer](https://en.wikipedia.org/wiki/Computer_cluster).
+It is called "distributed memory" because the supercomputer or cluster is
+made up of individual nodes and each node has its own memory.
 
 Generally speaking, efforts to write programs for these large systems
 come with challenges that a programmer needs to address in order to
@@ -49,8 +50,8 @@ parallelism available in a cluster or supercomputer, the application must
 expose that much parallelism and it needs to be able to run it without
 too much load imbalance. If you want to run in parallel on a PC, you
 might only need to handle keeping 8 cores busy. If you want to run on a
-big part of a Top500 system [4], you'll be using thousands or millions of
-cores.
+big part of a [Top500 system](https://en.wikipedia.org/wiki/TOP500),
+you'll be using thousands or millions of cores.
 
 ## Which Frameworks?
 
@@ -68,22 +69,15 @@ computing.
 
 ### MPI
 
-MPI ([MPI Forum][5] [OpenMPI Implementation][6] [MPICH Implementation][7]
-is a library supporting distributed-memory parallel computing. It can be
-used from many languages but it is most commonly used from C, C++, and
+MPI is a library supporting distributed-memory parallel computing. It can
+be used from many languages but it is most commonly used from C, C++, and
 Fortran.
+
+MPI is standardized by the [MPI Forum](https://www.mpi-forum.org/) and
+the most common implementations are [MPICH](https://www.mpich.org/) and
+[OpenMPI](https://www.open-mpi.org/) or derivatives of these.
 
 ### OpenSHMEM
 
 [OpenSHMEM](http://openshmem.org/) is a library for one-sided
 communication.
-
-# References
-
-[1] https://en.wikipedia.org/wiki/Radix_sort
-[2] https://en.wikipedia.org/wiki/Supercomputer
-[3] https://en.wikipedia.org/wiki/Computer_cluster
-[4] https://en.wikipedia.org/wiki/TOP500
-[5] https://www.mpi-forum.org/
-[6] https://www.open-mpi.org/
-[7] https://www.mpich.org/
