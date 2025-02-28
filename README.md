@@ -6,13 +6,16 @@ distributed-memory parallel programming frameworks. These implementations
 support comparisons of these different frameworks and their productivity
 and performance.
 
-As of Feb 2025, here are the performance results:
+As of Feb 2025, here are the performance results. These performance
+results are in units of Millions of elements sorted per second (so higher
+is better). The lines of code is reported for the terse version of each
+implementation.
 
-| Variant     | Performance | Lines of Code |
-| ---         | ---         | ---           |
-| chapel      | 6524        | 189           |
-| mpi         | 830         | 740           |
-| shmem       | 1874        | 704           |
+| Variant     | Performance | Source Lines of Code |
+| ---         | ---         | ---                  |
+| chapel      | 6524        | 138                  |
+| mpi         | 830         | 412                  |
+| shmem       | 1874        | 335                  |
 
 PRs contributing improved versions or implementations in other
 distributed-memory parallel programming frameworks are welcome!
