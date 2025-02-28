@@ -7,16 +7,17 @@ support comparisons of these different frameworks and their productivity
 and performance.
 
 As of Feb 2025, here are the performance results. These performance
-results are in units of Millions of elements sorted per second on 64
-nodes of a HPE Cray Supercomputing EX using 128 cores per node. The
+results are in units of millions of 16-byte elements sorted per second on
+64 nodes of a HPE Cray Supercomputing EX using 128 cores per node. The
 program size reported here is for the terse version of each
 implementation.
 
-| Variant     | Performance | Source Lines of Code |
-| ---         | ---         | ---                  |
-| chapel      | 6524 M/s    | 138                  |
-| mpi         | 830  M/s    | 412                  |
-| shmem       | 1874 M/s    | 335                  |
+| Variant     | Performance           | Source Lines of Code |
+| ---         | ---                   | ---                  |
+|             | in million elements sorted / s |             |
+| chapel      | 6524                  | 138                  |
+| mpi         | 830                   | 412                  |
+| shmem       | 1874                  | 335                  |
 
 PRs contributing improved versions or implementations in other
 distributed-memory parallel programming frameworks are welcome!
