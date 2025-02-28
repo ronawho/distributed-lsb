@@ -57,9 +57,11 @@ system that supports programs that run on a
 or [cluster computer](https://en.wikipedia.org/wiki/Computer_cluster).
 It is called "distributed memory" because the supercomputer or cluster is
 made up of individual nodes and each node has its own memory.
+Distributed-memory computation is needed when the problem being
+solved involves more data than what can fit in the memory of one node.
 
 Generally speaking, efforts to write programs for these large systems
-come with challenges that a programmer needs to address in order to
+come with challenges that a programmer needs to address in to
 achieve good performance. In particular, programs that run in parallel on
 a PC or server won't necessarily perform well on a supercomputer or
 cluster because the distributed-memory environment has additional
@@ -69,9 +71,11 @@ parallelism.
 Communication overhead is an issue because accessing data on a remote
 node or coordinating with a remote node is orders of magnitude slower
 than accessing local memory.
- * Local memory latency is unually measured in nanoseconds, e.g. 20ns
+ * Local memory latency is usually measured in nanoseconds, e.g. 20ns
  * Network latency is usually measured in microseconds, e.g. 2 μs
 
+Massive parallelism used effectively can significantly reduce the time
+it takes to do large computations.
 Massive parallelism is an issue because, to use the massive amount of
 parallelism available in a cluster or supercomputer, the application must
 expose that much parallelism and it needs to be able to run it without
@@ -82,6 +86,8 @@ you'll be using thousands or millions of cores.
 
 ## Which Frameworks?
 
+This repository provides implementations for distributed,
+parallel LSD-radix sort in Chapel, MPI, and OpenSHMEM.
 There is a directory in this repository for each framework. See the
 README in each directory for details on how to compile and run these and
 on the software versions measured.
@@ -100,7 +106,7 @@ to avoid small messages.
 ### MPI
 
 MPI is a library supporting distributed-memory parallel computing. It can
-be used from many languages but it is most commonly used from C, C++, and
+be used from many languages, but it is most commonly used from C, C++, and
 Fortran.
 
 MPI is standardized by the [MPI Forum](https://www.mpi-forum.org/) and
@@ -134,3 +140,13 @@ step, it stably sorts the local data by the digit. It uses the strided
 `iput` and `iget` functions to copy counts data between global counts
 arrays and local counts arrays. It uses `shmem_putmem` copy the array
 elements.
+
+# Call to Action
+
+Our goal is to find the fastest and most scalable distributed
+parallel sort.  If you know of other parallel sorts out there
+that could be competitive, please let us know by [FIXME].
+
+We also would be happy to see pull requests that provide other
+implementations of distributed parallel sorts or improve
+on the ones here.
