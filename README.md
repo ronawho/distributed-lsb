@@ -7,15 +7,16 @@ support comparisons of these different frameworks and their productivity
 and performance.
 
 As of Feb 2025, here are the performance results. These performance
-results are in units of Millions of elements sorted per second (so higher
-is better). The lines of code is reported for the terse version of each
+results are in units of Millions of elements sorted per second on 64
+nodes of a HPE Cray Supercomputing EX using 128 cores per node. The
+program size reported here is for the terse version of each
 implementation.
 
 | Variant     | Performance | Source Lines of Code |
 | ---         | ---         | ---                  |
-| chapel      | 6524        | 138                  |
-| mpi         | 830         | 412                  |
-| shmem       | 1874        | 335                  |
+| chapel      | 6524 M/s    | 138                  |
+| mpi         | 830  M/s    | 412                  |
+| shmem       | 1874 M/s    | 335                  |
 
 PRs contributing improved versions or implementations in other
 distributed-memory parallel programming frameworks are welcome!
@@ -60,11 +61,12 @@ system that supports programs that run on a
 or [cluster computer](https://en.wikipedia.org/wiki/Computer_cluster).
 It is called "distributed memory" because the supercomputer or cluster is
 made up of individual nodes and each node has its own memory.
-Distributed-memory computation is needed when the problem being
-solved involves more data than what can fit in the memory of one node.
+Distributed-memory computation is needed when one node can't solve the
+problem fast enough or when solving the problem involves more data than
+fits on one node.
 
 Generally speaking, efforts to write programs for these large systems
-come with challenges that a programmer needs to address in to
+come with challenges that a programmer needs to address to
 achieve good performance. In particular, programs that run in parallel on
 a PC or server won't necessarily perform well on a supercomputer or
 cluster because the distributed-memory environment has additional
@@ -144,11 +146,13 @@ step, it stably sorts the local data by the digit. It uses the strided
 arrays and local counts arrays. It uses `shmem_putmem` copy the array
 elements.
 
-# Call to Action
+# Get Involved
 
-Our goal is to find the fastest and most scalable distributed
-parallel sort.  If you know of other parallel sorts out there
-that could be competitive, please let us know by [FIXME].
+In addition to comparing the productivity and performance of different
+parallel computing frameworks, we'd like to find the the fastest and most
+scalable distributed parallel sort. If you know of other parallel sorts
+out there that could be competitive, please let us know by opening an
+issue in this repository or reaching out to @mppf on social media.
 
 We also would be happy to see pull requests that provide other
 implementations of distributed parallel sorts or improve
