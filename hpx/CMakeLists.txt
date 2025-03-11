@@ -11,10 +11,10 @@ set (CMAKE_CXX_STANDARD 20)
 #                      HPX::iostreams_component
 #                      HPX::partitioned_vector_component
 #                     )
-add_hpx_executable(my_hpx_program
-  SOURCES main.cpp
+add_hpx_executable(hpx_lsbsort
+  SOURCES hpx_lsbsort.cpp
   COMPONENT_DEPENDENCIES iostreams partitioned_vector)
-target_include_directories(my_hpx_program PUBLIC pcg-cpp/include)
+target_include_directories(hpx_lsbsort PUBLIC pcg-cpp/include)
 
 
 add_hpx_executable(scan-bug
