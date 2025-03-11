@@ -20,3 +20,7 @@ target_include_directories(hpx_lsbsort PUBLIC pcg-cpp/include)
 add_hpx_executable(scan-bug
   SOURCES scan-bug.cpp
   COMPONENT_DEPENDENCIES iostreams partitioned_vector)
+
+add_hpx_executable(hello
+  SOURCES hello.cpp
+  COMPONENT_DEPENDENCIES iostreams partitioned_vector)
