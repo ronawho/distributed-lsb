@@ -7,8 +7,6 @@
 //#include <hpx/collectives/exclusive_scan.hpp>
 #include <hpx/modules/collectives.hpp>
 
-#include <pcg_random.hpp>
-
 #include <cstddef>
 #include <cstdio>
 #include <cstdint>

@@ -341,7 +341,7 @@ DistributedArray<EltType>::create(std::string name, int64_t totalNumElements) {
   if (eltsHere < 0) eltsHere = 0;
   int64_t totalNumEltsRounded = eltsPerRank * numRanks;
 
- std::cout << "creating dist array " << name << " on rank " << myRank << "/" << numRanks << "\n";
+ //std::cout << "creating dist array " << name << " on rank " << myRank << "/" << numRanks << "\n";
 
   auto pv = hpx::partitioned_vector<EltType>();
   std::string latchName = name + "latch";
@@ -358,11 +358,11 @@ DistributedArray<EltType>::create(std::string name, int64_t totalNumElements) {
     f1.get();
   }
 
-  if (0 == myRank) {
+  /*if (0 == myRank) {
     std::cout << "created dist array " << name << " with size " << pv.size() << "\n";
-  }
+  }*/
 
-  std::cout << " " << name << ".size " << pv.size() << " on " << myRank << "\n";
+  //std::cout << " " << name << ".size " << pv.size() << " on " << myRank << "\n";
 
   // set up the lv view
   //auto lv = partitioned_vector_loc_view<EltType>(pv);
@@ -661,7 +661,7 @@ int hpx_main(hpx::program_options::variables_map& vm)
   auto numRanks = localities.size();
   std::size_t const nThreads = hpx::get_os_thread_count();
 
-  std::cout << "hello from rank " << myRank << "/" << numRanks << "\n";
+  //std::cout << "hello from rank " << myRank << "/" << numRanks << "\n";
 
   int64_t numElems = 128*1024*1024;
   if (vm.count("numElems"))
