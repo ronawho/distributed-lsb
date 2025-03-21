@@ -31,18 +31,6 @@ bool operator==(const SortElement& x, const SortElement& y) {
   return x.key == y.key && x.val == y.val;
 }
 
-struct CountBufElt {
-  int32_t digit = 0;
-  int32_t rank = 0;
-  int64_t count = 0;
-};
-
-struct ShuffleBufSortElement {
-  uint64_t key = 0;
-  uint64_t val = 0;
-  int64_t  dstGlobalIdx = 0;
-};
-
 static inline int64_t divCeil(int64_t x, int64_t y) {
   return (x + y - 1) / y;
 }
@@ -122,38 +110,6 @@ DistributedArray<EltType>::create(std::string name, int64_t totalNumElements) {
 
 inline int getBucket(SortElement x, int d) {
   return (x.key >> (RADIX*d)) & MASK;
-}
-
-void localCount(std::vector<SortElement>& A,
-                std::vector<SortElement>& B,
-                counts_array_t& starts,
-                counts_array_t& counts,
-                int digit,
-                int64_t n) {
-  assert(A.size() == B.size());
-
-  starts.fill(0);
-  counts.fill(0);
-
-  for (int64_t i = 0; i < n; i++) {
-    SortElement elt = A[i];
-    counts[getBucket(elt, digit)] += 1;
-  }
-
-  {
-    int64_t sum = 0;
-    for (int i = 0; i < COUNTS_SIZE; i++) {
-      starts[i] = sum;
-      sum += counts[i];
-    }
-  }
-
-  for (int64_t i = 0; i < n; i++) {
-    SortElement elt = A[i];
-    int64_t &next = starts[getBucket(elt, digit)];
-    B[next] = elt;
-    next += 1;
-  }
 }
 
 void copyCountsToGlobalCounts(counts_array_t& localCounts,
@@ -374,7 +330,6 @@ int main(int argc, char *argv[]) {
     std::chrono::duration<double> elapsed = end - start;
     if (myRank == 0) {
       std::cout << "Generated random values in " << elapsed.count() << " s\n";
-      flushOutput();
     }
     shmem_barrier_all();
   }
@@ -382,7 +337,6 @@ int main(int argc, char *argv[]) {
   {
     if (myRank == 0) {
       std::cout << "Sorting\n";
-      flushOutput();
     }
 
     shmem_barrier_all();
@@ -397,7 +351,6 @@ int main(int argc, char *argv[]) {
       std::cout << "Sorted " << n << " values in " << elapsed.count() << "\n";;
       std::cout << "That's " << n/elapsed.count()/1000.0/1000.0
                 << " M elements sorted / s\n";
-      flushOutput();
     }
     shmem_barrier_all();
   }
