@@ -43,31 +43,6 @@ bool operator==(const SortElement& x, const SortElement& y) {
   return x.key == y.key && x.val == y.val;
 }
 
-// to help in communicating the counts
-struct CountBufElt {
-  int32_t digit = 0;
-  int32_t rank = 0;
-  int64_t count = 0;
-};
-std::ostream& operator<<(std::ostream& os, const CountBufElt& x) {
-  os << "(" << x.digit << "," << x.rank << "," << x.count << ")";
-  return os;
-}
-
-// to help in communicating the elements
-struct ShuffleBufSortElement {
-  uint64_t key = 0;
-  uint64_t val = 0;
-  int64_t  dstGlobalIdx = 0;
-};
-std::ostream& operator<<(std::ostream& os, const ShuffleBufSortElement& x) {
-  os << "(";
-  printhex(os, x.key);
-  os << "," << x.val << "," << x.dstGlobalIdx << ")";
-  return os;
-}
-
-
 // to help with sending sort elements to remote locales
 // helper to divide while rounding up
 static inline int64_t divCeil(int64_t x, int64_t y) {
@@ -240,48 +215,6 @@ void printAllLocalElts(const T* elts,
 // compute the bucket for a value when sort is on digit 'd'
 inline int getBucket(SortElement x, int d) {
   return (x.key >> (RADIX*d)) & MASK;
-}
-
-// rearranges data according values at 'digit' & returns count information
-//   A: contains the input data
-//   B: after it runs, contains the rearranged data
-//   starts: should not be used after it runs
-//   counts: after it runs, contains the number of elements for each bucket
-//   digit: the current digit for shuffling
-void localCount(std::vector<SortElement>& A,
-                  std::vector<SortElement>& B,
-                  counts_array_t& starts,
-                  counts_array_t& counts,
-                  int digit,
-                  int64_t n) {
-  assert(A.size() == B.size());
-
-  // clear out starts and counts
-  starts.fill(0);
-  counts.fill(0);
-
-  // compute the count for each digit
-  for (int64_t i = 0; i < n; i++) {
-    SortElement elt = A[i];
-    counts[getBucket(elt, digit)] += 1;
-  }
-
-  // compute the starts with an exclusive scan
-  {
-    int64_t sum = 0;
-    for (int i = 0; i < COUNTS_SIZE; i++) {
-      starts[i] = sum;
-      sum += counts[i];
-    }
-  }
-
-  // shuffle the data
-  for (int64_t i = 0; i < n; i++) {
-    SortElement elt = A[i];
-    int64_t &next = starts[getBucket(elt, digit)];
-    B[next] = elt;
-    next += 1;
-  }
 }
 
 void copyCountsToGlobalCounts(counts_array_t& localCounts,
