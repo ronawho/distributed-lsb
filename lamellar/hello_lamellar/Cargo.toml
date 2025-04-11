@@ -1,0 +1,7 @@
+[package]
+name = "hello_lamellar"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lamellar = { version = "0.7.0"} #add features = ["enable-rofi"] to use rofi lamellae
