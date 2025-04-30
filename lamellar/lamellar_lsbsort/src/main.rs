@@ -13,7 +13,7 @@ use lamellar::array::Distribution;
 mod prefix_sum_impl;
 use prefix_sum_impl::inclusive_prefix_sum;
 
-const RADIX: u64 = 2; // TODO set to 16
+const RADIX: u64 = 16; // TODO set to 16
 const N_DIGITS: u64 = 64 / RADIX;
 const N_BUCKETS: u64 = 1 << RADIX;
 const COUNTS_SIZE: usize = N_BUCKETS as usize;
@@ -176,7 +176,11 @@ fn global_shuffle(A: &UnsafeArray::<SortElement>,
 
     /*println!("counts is");
     counts.print();
-    println!("global shuffle 2a");*/
+    unsafe {
+        println!("counts sum is {:?}", counts.sum().block());
+    }*/
+
+    //println!("global shuffle 2a");
 
     let counts_lck = counts.into_local_lock().block();
 
@@ -218,12 +222,12 @@ fn global_shuffle(A: &UnsafeArray::<SortElement>,
     }
 
     //println!("global shuffle 3");
+    //
     let starts = counts_lck.into_unsafe().block();
 
     /*println!("starts is");
-    starts.print();*/
-
-    //println!("global shuffle 4");
+    starts.print();
+    println!("global shuffle 4");*/
 
     // shuffle the data in A to B based on the counts
     unsafe {
@@ -238,7 +242,6 @@ fn global_shuffle(A: &UnsafeArray::<SortElement>,
 
                  async move {
                      //println!("tid {:?} got chunk {:?}", tid, task_slice);
-                     // note, vec! allocates a fixed-sized array on the heap
                      let mut this_task_starts;
 
                      // load the start positions for this task / chunk
@@ -265,6 +268,8 @@ fn global_shuffle(A: &UnsafeArray::<SortElement>,
                              indices[i] = *r as usize;
                              *r += 1;
                          }
+
+                         //println!("tid {:?} chunk {:?} indices {:?}", tid, task_slice, indices);
 
                          let _ = B_.batch_store(indices, task_slice).await;
 
@@ -412,7 +417,9 @@ fn main() {
 
     world.barrier();
 
-    println!("elapsed rng time {}", time_rng.elapsed().as_secs_f64());
+    if my_pe == 0 {
+        println!("elapsed rng time {}", time_rng.elapsed().as_secs_f64());
+    }
 
 
     /*println!("Input for sort");
@@ -428,6 +435,8 @@ fn main() {
     /*println!("Output from sort");
     A.print();*/
 
-    println!("elapsed sort time {}", time_rng.elapsed().as_secs_f64());
+    if my_pe == 0 {
+        println!("elapsed sort time {}", time_rng.elapsed().as_secs_f64());
+    }
 }
 
