@@ -1,0 +1,10 @@
+[package]
+name = "hello_lamellar"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lamellar = { version = "= 0.7.0"} #add features = ["enable-rofi"] to use rofi lamellae
+#lamellar = { version = "0.7.1"} #add features = ["enable-rofi"] to use rofi lamellae
+serde = { version = "1.0.219", features = ["derive"] }
+serde_bytes = "0.11.7"
