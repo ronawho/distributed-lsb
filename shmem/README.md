@@ -47,7 +47,7 @@ CC -O3 shmem_lsbsort.cpp -o shmem_lsbsort -I pcg-cpp/include/
 Run command:
 
 ```
-srun --nodes 64 --ntasks-per-node=128 ./mpi_lsbsort --n 68719476736
+srun --nodes 64 --ntasks-per-node=128 ./shmem_lsbsort --n 68719476736
 ```
 
 Output:
