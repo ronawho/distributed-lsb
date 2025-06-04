@@ -336,11 +336,9 @@ fn main() {
 
     if my_pe == 0 {
         let time_sort = time_sort.elapsed().as_secs_f64();
-        println!(
-            "elapsed sort time {} M elems/s = {}",
-            time_sort,
-            (n as f64 / 1000000.0) / time_sort
-        );
+        println!("Sorted {} values in {}", n, time_sort);
+        println!("That's {} M elements sorted / s",
+                 (n as f64 / 1000000.0) / time_sort);
     }
 
     //roughly check that the data is sorted

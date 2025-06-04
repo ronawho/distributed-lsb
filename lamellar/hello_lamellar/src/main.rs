@@ -17,6 +17,9 @@ fn main() {
     let init_time = timer.elapsed();
     println!("init_time: {:?}", init_time);
 
+    let n_tasks_per_pe: usize = world.num_threads_per_pe();
+    println!("n pes {:?} tasks per pe {:?}", num_pes, n_tasks_per_pe);
+
     let timer = std::time::Instant::now();
     let local_vec = vec![0usize; local_length];
     let local_vec_time = timer.elapsed();
