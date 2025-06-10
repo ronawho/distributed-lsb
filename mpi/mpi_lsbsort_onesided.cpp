@@ -21,7 +21,7 @@
 #define RADIX 16
 #define N_DIGITS (64/RADIX)
 #define N_BUCKETS (1 << RADIX)
-#define COUNTS_SIZE (N_BUCKETS + 1)
+#define COUNTS_SIZE (N_BUCKETS)
 #define MASK (N_BUCKETS - 1)
 using counts_array_t = std::array<int64_t, COUNTS_SIZE>;
 
@@ -60,21 +60,6 @@ std::ostream& operator<<(std::ostream& os, const CountBufElt& x) {
 }
 static MPI_Datatype gCountBufEltMpiType;
 
-// to help in communicating the elements
-struct ShuffleBufSortElement {
-  uint64_t key = 0;
-  uint64_t val = 0;
-  int64_t  dstGlobalIdx = 0;
-};
-std::ostream& operator<<(std::ostream& os, const ShuffleBufSortElement& x) {
-  os << "(";
-  printhex(os, x.key);
-  os << "," << x.val << "," << x.dstGlobalIdx << ")";
-  return os;
-}
-static MPI_Datatype gShuffleBufSortElementMpiType;
-
-
 // to help with sending sort elements to remote locales
 // helper to divide while rounding up
 static inline int64_t divCeil(int64_t x, int64_t y) {
@@ -86,7 +71,7 @@ static inline int64_t divCeil(int64_t x, int64_t y) {
 // This actually just stores the current rank's portion of a distributed
 // array along with some metadata.
 // It doesn't support communication directly. Communication is expected
-// to happen in the form of MPI calls working with localPart().
+// to happen in the form of shmem calls working with localPart().
 template<typename EltType>
 struct DistributedArray {
   struct RankAndLocalIndex {
@@ -95,7 +80,8 @@ struct DistributedArray {
   };
 
   std::string name_;
-  std::vector<EltType> localPart_;
+  MPI_Win win_;
+  EltType* localPart_ = nullptr;
   int64_t numElementsTotal_ = 0;    // number of elements on all ranks
   int64_t numElementsPerRank_ = 0 ; // number per rank
   int64_t numElementsHere_ = 0;     // number this rank
@@ -104,6 +90,12 @@ struct DistributedArray {
 
   static DistributedArray<EltType>
   create(std::string name, int64_t totalNumElements);
+
+  ~DistributedArray() {
+    if (localPart_ != nullptr) {
+      MPI_Win_free(&win_);
+    }
+  }
 
   // convert a local index to a global index
   inline int64_t localIdxToGlobalIdx(int64_t locIdx) const {
@@ -121,13 +113,14 @@ struct DistributedArray {
 
   // accessors
   inline const std::string& name() const { return name_; }
-  inline const std::vector<EltType>& localPart() const { return localPart_; }
-  inline std::vector<EltType>& localPart() { return localPart_; }
+  inline const EltType* localPart() const { return localPart_; }
+  inline EltType* localPart() { return localPart_; }
   inline int64_t numElementsTotal() const { return numElementsTotal_; }
   inline int64_t numElementsPerRank() const { return numElementsPerRank_; }
   inline int64_t numElementsHere() const { return numElementsHere_; }
   inline int myRank() const { return myRank_; }
   inline int numRanks() const { return numRanks_; }
+  inline MPI_Win win() const { return win_; }
 
   // helper to print part of the distributed array
   void print(int64_t nToPrintPerRank) const;
@@ -150,7 +143,8 @@ DistributedArray<EltType>::create(std::string name, int64_t totalNumElements) {
 
   DistributedArray<EltType> ret;
   ret.name_ = std::move(name);
-  ret.localPart_.resize(eltsPerRank);
+  MPI_Win_allocate((MPI_Aint)(eltsPerRank * sizeof(EltType)), sizeof(EltType),
+                   MPI_INFO_NULL, MPI_COMM_WORLD, &ret.localPart_, &ret.win_);
   ret.numElementsTotal_ = totalNumElements;
   ret.numElementsPerRank_ = eltsPerRank;
   ret.numElementsHere_ = eltsHere;
@@ -172,6 +166,7 @@ template<typename EltType>
 void DistributedArray<EltType>::print(int64_t nToPrintPerRank) const {
   MPI_Barrier(MPI_COMM_WORLD);
 
+
   if (myRank_ == 0) {
     if (nToPrintPerRank*numRanks_ >= numElementsTotal_) {
       std::cout << name_ << ": displaying all "
@@ -188,7 +183,7 @@ void DistributedArray<EltType>::print(int64_t nToPrintPerRank) const {
       int64_t i = 0;
       for (i = 0; i < nToPrintPerRank && i < numElementsHere_; i++) {
         int64_t glbIdx = localIdxToGlobalIdx(i);
-        std::cout << name_ << "[" << glbIdx << "] = " << localPart_[i] << "\n";
+        std::cout << name_ << "[" << glbIdx << "] = " << localPart_[i] << " (rank " << myRank_ << ")\n";
       }
       if (i < numElementsHere_) {
         std::cout << "...\n";
@@ -202,48 +197,6 @@ void DistributedArray<EltType>::print(int64_t nToPrintPerRank) const {
 // compute the bucket for a value when sort is on digit 'd'
 inline int getBucket(SortElement x, int d) {
   return (x.key >> (RADIX*d)) & MASK;
-}
-
-// rearranges data according values at 'digit' & returns count information
-//   A: contains the input data
-//   B: after it runs, contains the rearranged data
-//   starts: should not be used after it runs
-//   counts: after it runs, contains the number of elements for each bucket
-//   digit: the current digit for shuffling
-void localShuffle(std::vector<SortElement>& A,
-                  std::vector<SortElement>& B,
-                  counts_array_t& starts,
-                  counts_array_t& counts,
-                  int digit,
-                  int64_t n) {
-  assert(A.size() == B.size());
-
-  // clear out starts and counts
-  starts.fill(0);
-  counts.fill(0);
-
-  // compute the count for each digit
-  for (int64_t i = 0; i < n; i++) {
-    SortElement elt = A[i];
-    counts[getBucket(elt, digit)] += 1;
-  }
-
-  // compute the starts with an exclusive scan
-  {
-    int64_t sum = 0;
-    for (int i = 0; i < COUNTS_SIZE; i++) {
-      starts[i] = sum;
-      sum += counts[i];
-    }
-  }
-
-  // shuffle the data
-  for (int64_t i = 0; i < n; i++) {
-    SortElement elt = A[i];
-    int64_t &next = starts[getBucket(elt, digit)];
-    B[next] = elt;
-    next += 1;
-  }
 }
 
 // helper for MPI_Alltoallv that:
@@ -448,7 +401,6 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
     c.count = GlobalStarts.localPart()[i];
     sendBuf[i] = c;
   }
-
   // sort sendBuf according to destination rank and then by digit
   std::sort(sendBuf.begin(), sendBuf.end(),
             [](const CountBufElt& a, const CountBufElt& b) {
@@ -478,6 +430,7 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
   }
 }
 
+// shuffles the data from A into B
 void globalShuffle(DistributedArray<SortElement>& A,
                    DistributedArray<SortElement>& B,
                    int digit) {
@@ -489,10 +442,17 @@ void globalShuffle(DistributedArray<SortElement>& A,
   auto starts = std::make_unique<counts_array_t>();
   auto counts = std::make_unique<counts_array_t>();
 
-  // Shuffle the data from A into B
-  // the data in B will be sorted by the current digit
-  localShuffle(A.localPart(), B.localPart(), *starts, *counts, digit,
-               A.numElementsHere());
+  // clear out starts and counts
+  starts->fill(0);
+  counts->fill(0);
+
+  // compute the count for each digit
+  int64_t locN = A.numElementsHere();
+  SortElement* localPart = A.localPart();
+  for (int64_t i = 0; i < locN; i++) {
+    SortElement elt = localPart[i];
+    (*counts)[getBucket(elt, digit)] += 1;
+  }
 
   // Now, each rank has an array of counts, like this
   //  [r0d0, r0d1, ... r0d255]  | on rank 0
@@ -524,69 +484,42 @@ void globalShuffle(DistributedArray<SortElement>& A,
   // copy the per-bucket starts from the global counts array
   copyStartsFromGlobalStarts(GlobalStarts, *starts);
 
+  // fence on B since we will be writing to it with MPI_Put
+  MPI_Win_fence(0,B.win());
+
   // Now go through the data in B assigning each element its final
   // position and sending that data to the other ranks
-  // Leave the result in A
-  {
-    // how many to send to each destination rank?
-    std::vector<int> sendCounts;
-    sendCounts.resize(numRanks, 0);
+  // Leave the result in B
+  SortElement* GB = B.localPart(); // it's symmetric
+  for (int64_t i = 0; i < locN; i++) {
+    SortElement elt = localPart[i];
+    int bucket = getBucket(elt, digit);
+    int64_t &next = (*starts)[bucket];
+    int64_t dstGlobalIdx = next;
+    next += 1;
 
-    int64_t numHere = B.numElementsHere();
-
-    // what to send
-    std::vector<ShuffleBufSortElement> sendBuf;
-    sendBuf.resize(numHere);
-
-    // space for receiving
-    std::vector<ShuffleBufSortElement> recvBuf;
-    recvBuf.resize(numHere);
-
-    // fill in sendBuf and count the number for each destination
-    for (int64_t i = 0; i < numHere; i++) {
-      SortElement elt = B.localPart()[i];
-      int bucket = getBucket(elt, digit);
-      // what will be the destination index?
-      int64_t &next = (*starts)[bucket];
-      int64_t dstGlobalIdx = next;
-      next += 1;
-      auto dst = B.globalIdxToLocalIdx(dstGlobalIdx);
-      sendCounts[dst.rank]++;
-      ShuffleBufSortElement e;
-      e.key = elt.key;
-      e.val = elt.val;
-      e.dstGlobalIdx = dstGlobalIdx;
-      sendBuf[i] = e;
-    }
-
-    // use myMpiAllToAllV to communicate the elements in sendBuf to recvBuf.
-    myMpiAllToAllV(sendBuf, sendCounts, recvBuf, gShuffleBufSortElementMpiType);
-
-    // Now recvBuf contains the elements from other nodes,
-    // but these aren't yet in the correct locations.
-    // Store them into A according to dstGlobalIdx
-    for (int64_t i = 0; i < numHere; i++) {
-      ShuffleBufSortElement e = recvBuf[i];
-      auto dst = B.globalIdxToLocalIdx(e.dstGlobalIdx);
-      assert(dst.rank == myRank);
-      SortElement& elt = A.localPart()[dst.locIdx];
-      elt.key = e.key;
-      elt.val = e.val;
-    }
+    // store 'elt' into 'dstGlobalIdx'
+    auto dst = B.globalIdxToLocalIdx(dstGlobalIdx);
+    assert(0 <= dst.rank && dst.rank < numRanks);
+    MPI_Put(&elt, 1, gSortElementMpiType,
+            dst.rank, dst.locIdx, 1, gSortElementMpiType, B.win());
   }
+
+  // fence on B since we wrote to it with MPI_Put
+  MPI_Win_fence(0,B.win());
 }
 
 // Sort the data in A, using B as scratch space.
 void mySort(DistributedArray<SortElement>& A,
             DistributedArray<SortElement>& B) {
-  for (int digit = 0; digit < N_DIGITS; digit++) {
+  assert(N_DIGITS % 2 == 0);
+  for (int digit = 0; digit < N_DIGITS; digit += 2) {
     globalShuffle(A, B, digit);
+    globalShuffle(B, A, digit+1);
   }
 }
 
-int main(int argc, char *argv[]) {
-  MPI_Init(&argc, &argv);
-
+int mymain(int argc, char *argv[]) {
   // read in the problem size
   bool printSome = false;
   bool verifyLocally = false;
@@ -629,10 +562,6 @@ int main(int argc, char *argv[]) {
   assert(2*sizeof(unsigned long long) == sizeof(CountBufElt));
   MPI_Type_contiguous(2, MPI_UNSIGNED_LONG_LONG, &gCountBufEltMpiType);
   MPI_Type_commit(&gCountBufEltMpiType);
-  assert(3*sizeof(unsigned long long) == sizeof(ShuffleBufSortElement));
-  MPI_Type_contiguous(3, MPI_UNSIGNED_LONG_LONG, &gShuffleBufSortElementMpiType);
-  MPI_Type_commit(&gShuffleBufSortElementMpiType);
-
 
   // create distributed arrays A and B
   auto A = DistributedArray<SortElement>::create("A", n);
@@ -648,11 +577,11 @@ int main(int argc, char *argv[]) {
     }
 
     auto rng = pcg64(myRank);
-    int64_t i = 0;
-    for (auto& elt : A.localPart()) {
+    int64_t locN = A.numElementsHere();
+    for (int64_t i = 0; i < locN; i++) {
+      auto& elt = A.localPart()[i];
       elt.key = rng();
       elt.val = A.localIdxToGlobalIdx(i);
-      i++;
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
@@ -677,6 +606,7 @@ int main(int argc, char *argv[]) {
                & LocalInputCopy[0], A.numElementsPerRank(),
                gSortElementMpiType, 0, MPI_COMM_WORLD);
   }
+
 
   // Shuffle the data in-place to sort by the current digit
   {
@@ -738,6 +668,12 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  MPI_Finalize();
   return 0;
+}
+int main(int argc, char *argv[]) {
+  int rc = 0;
+  MPI_Init(&argc, &argv);
+  rc = mymain(argc, argv);
+  MPI_Finalize();
+  return rc;
 }

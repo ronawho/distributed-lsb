@@ -11,6 +11,8 @@ It supports both local threads and distributed-memory processes.
 
 # Building
 
+(First, you will need to install Rust if you have not already.)
+
 Lamellar is the main dependency here, although it has quite a few
 dependencies in turn. Cargo can download and build all of these
 dependences.
@@ -44,3 +46,10 @@ with 8 threads:
 cd lamellar_lsbsort
 lamellar_run.sh -N=4 -T=8 target/release/lamellar_lsbsort
 ```
+
+# HPC System
+
+`spack install rust`
+`spack load rust`
+
+load PrgEnv-gnu (rust dependencies don't build with PrgEnv-cray loaded)
