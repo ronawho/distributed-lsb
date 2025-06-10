@@ -708,6 +708,9 @@ int main(int argc, char *argv[]) {
   }
 
   if (verifyLocally) {
+    if (myRank == 0) {
+      std::cout << "Verifying\n";
+    }
     // gather the output from sorting
     std::vector<SortElement> LocalOutputCopy;
     LocalOutputCopy.resize(numRanks*A.numElementsPerRank());
