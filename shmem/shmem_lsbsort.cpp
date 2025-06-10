@@ -173,45 +173,6 @@ void DistributedArray<EltType>::print(int64_t nToPrintPerRank) const {
   }
 }
 
-template<typename T>
-void printAllLocalElts(const T* elts,
-                       int64_t nEltsPerRank,
-                       const char* name,
-                       int64_t nToPrintPerRank) {
-  int myRank = 0;
-  int numRanks = 0;
-  myRank = shmem_my_pe();
-  numRanks = shmem_n_pes();
-
-  shmem_barrier_all();
-
-  if (myRank == 0) {
-    if (nToPrintPerRank >= nEltsPerRank) {
-      std::cout << name << ": displaying all "
-                << nEltsPerRank << " elements per rank\n";
-    } else {
-      std::cout << name << ": displaying first " << nToPrintPerRank
-                << " elements on each rank"
-                << " out of " << nEltsPerRank << " elements per rank\n";
-    }
-  }
-
-  for (int rank = 0; rank < numRanks; rank++) {
-    if (myRank == rank) {
-      int64_t i = 0;
-      for (i = 0; i < nToPrintPerRank && i < nEltsPerRank; i++) {
-        std::cout << name << "(rank " << rank << ") [" << i << "] = " << elts[i] << "\n";
-      }
-      if (i < nEltsPerRank) {
-        std::cout << "...\n";
-      }
-      flushOutput();
-    }
-    shmem_barrier_all();
-  }
-}
-
-
 // compute the bucket for a value when sort is on digit 'd'
 inline int getBucket(SortElement x, int d) {
   return (x.key >> (RADIX*d)) & MASK;
