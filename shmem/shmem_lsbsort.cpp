@@ -14,6 +14,10 @@
 #include <shmem.h>
 #include <pcg_random.hpp>
 
+extern "C" {
+#include "convey.h"
+}
+
 #define RADIX 16
 #define N_DIGITS (64/RADIX)
 #define N_BUCKETS (1 << RADIX)
@@ -339,10 +343,15 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
   shmem_barrier_all();
 }
 
+typedef struct {
+  int64_t locIdx;
+  SortElement value;
+} packet_t;
+
 // shuffles the data from A into B
 void globalShuffle(DistributedArray<SortElement>& A,
                    DistributedArray<SortElement>& B,
-                   int digit) {
+                   int digit, convey_t* conveyor) {
   int myRank = 0;
   int numRanks = 0;
   myRank = shmem_my_pe();
@@ -396,19 +405,34 @@ void globalShuffle(DistributedArray<SortElement>& A,
   // Now go through the data in B assigning each element its final
   // position and sending that data to the other ranks
   // Leave the result in B
-  SortElement* GB = B.localPart(); // it's symmetric
-  for (int64_t i = 0; i < locN; i++) {
-    SortElement elt = localPart[i];
-    int bucket = getBucket(elt, digit);
-    int64_t &next = (*starts)[bucket];
-    int64_t dstGlobalIdx = next;
-    next += 1;
+  convey_begin(conveyor, sizeof(packet_t), alignof(packet_t));
 
-    // store 'elt' into 'dstGlobalIdx'
-    auto dst = B.globalIdxToLocalIdx(dstGlobalIdx);
-    assert(0 <= dst.rank && dst.rank < numRanks);
-    shmem_putmem(GB + dst.locIdx, &elt, sizeof(SortElement), dst.rank);
+  SortElement* GB = B.localPart(); // it's symmetric
+  int64_t i = 0;
+  while (convey_advance(conveyor, i == locN)) {
+    for (; i < locN; i++) {
+      SortElement elt = localPart[i];
+      int bucket = getBucket(elt, digit);
+      int64_t &next = (*starts)[bucket];
+      int64_t dstGlobalIdx = next;
+
+      // store 'elt' into 'dstGlobalIdx'
+      auto dst = B.globalIdxToLocalIdx(dstGlobalIdx);
+
+      assert(0 <= dst.rank && dst.rank < numRanks);
+      packet_t payload = {dst.locIdx, elt};
+      if (! convey_push(conveyor, &payload, dst.rank))
+        break;
+
+      next += 1;
+    }
+
+    packet_t local;
+    while( convey_pull(conveyor, &local, NULL) == convey_OK)
+      GB[local.locIdx] = local.value;
+
   }
+  convey_reset(conveyor);
 }
 
 // Sort the data in A, using B as scratch space.
@@ -419,11 +443,13 @@ void mySort(DistributedArray<SortElement>& A,
   myRank = shmem_my_pe();
   numRanks = shmem_n_pes();
 
+  convey_t* conveyor = convey_new(SIZE_MAX, 0, NULL, convey_opt_SCATTER);
   assert(N_DIGITS % 2 == 0);
   for (int digit = 0; digit < N_DIGITS; digit += 2) {
-    globalShuffle(A, B, digit);
-    globalShuffle(B, A, digit+1);
+    globalShuffle(A, B, digit, conveyor);
+    globalShuffle(B, A, digit+1, conveyor);
   }
+  convey_free(conveyor);
 }
 
 int main(int argc, char *argv[]) {
