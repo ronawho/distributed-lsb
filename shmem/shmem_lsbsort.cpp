@@ -202,36 +202,16 @@ void copyCountsToGlobalCounts(counts_array_t& localCounts,
   //  [r0d2, r1d2, r2d2, ...]   | on rank 1 ...
   //  ...
 
-  for (int64_t i = 0; i < COUNTS_SIZE;) {
-    // compute the number of elements that go to a particular destination rank
+  for (int64_t ii = 0; ii < COUNTS_SIZE; ii++) {
+    int i = (ii + myRank * (COUNTS_SIZE/numRanks)) % numRanks;
     int64_t dstGlobalIdx = i*numRanks + myRank;
     auto dst = GlobalCounts.globalIdxToLocalIdx(dstGlobalIdx);
-
     int dstRank = dst.rank;
-    int nToSameRank = 0;
-    while (i+nToSameRank < COUNTS_SIZE) {
-      int64_t ii = (i+nToSameRank)*numRanks + myRank;
-      int nextRank = GlobalCounts.globalIdxToLocalIdx(ii).rank;
-      if (nextRank != dstRank) {
-        break;
-      }
-      nToSameRank++;
-    }
-    assert(nToSameRank >= 1);
-    assert(i + nToSameRank <= COUNTS_SIZE);
-
     int64_t* GCA = &GlobalCounts.localPart()[0]; // it's symmetric
 
-    shmem_int64_iput( GCA + dst.locIdx, // dst region on the remote PE
-                      &localCounts[i],  // src region on the local PE
-                      numRanks,         // stride for destination array
-                      1,                // stride for source array
-                      nToSameRank,      // number of elements
-                      dstRank           // destination rank
-                    );
-
-    i += nToSameRank;
+    shmem_int64_put_nbi(GCA + dst.locIdx, &localCounts[i], 1, dstRank);
   }
+
 
   shmem_barrier_all();
 }
