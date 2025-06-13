@@ -181,9 +181,13 @@ void DistributedArray<EltType>::print(int64_t nToPrintPerRank) const {
 inline int getBucket(SortElement x, int d) {
   return (x.key >> (RADIX*d)) & MASK;
 }
+typedef struct {
+  int64_t locIdx;
+  int64_t value;
+} packet2_t;
 
 void copyCountsToGlobalCounts(counts_array_t& localCounts,
-                              DistributedArray<int64_t>& GlobalCounts) {
+                              DistributedArray<int64_t>& GlobalCounts, convey_t * conveyor) {
   int myRank = 0;
   int numRanks = 0;
   myRank = shmem_my_pe();
@@ -202,16 +206,28 @@ void copyCountsToGlobalCounts(counts_array_t& localCounts,
   //  [r0d2, r1d2, r2d2, ...]   | on rank 1 ...
   //  ...
 
-  for (int64_t ii = 0; ii < COUNTS_SIZE; ii++) {
-    int i = (ii + myRank * (COUNTS_SIZE/numRanks)) % numRanks;
-    int64_t dstGlobalIdx = i*numRanks + myRank;
-    auto dst = GlobalCounts.globalIdxToLocalIdx(dstGlobalIdx);
-    int dstRank = dst.rank;
+  int64_t ii = 0;
+  convey_begin(conveyor, sizeof(packet2_t), alignof(packet2_t));
+  while (convey_advance(conveyor, ii == COUNTS_SIZE)) {
     int64_t* GCA = &GlobalCounts.localPart()[0]; // it's symmetric
+    for (; ii < COUNTS_SIZE; ii++) {
+      int i = ii;//(ii + myRank * (COUNTS_SIZE/numRanks)) % numRanks;
+      int64_t dstGlobalIdx = i*numRanks + myRank;
+      auto dst = GlobalCounts.globalIdxToLocalIdx(dstGlobalIdx);
 
-    shmem_int64_put_nbi(GCA + dst.locIdx, &localCounts[i], 1, dstRank);
+      int dstRank = dst.rank;
+
+      packet2_t payload = {dst.locIdx, localCounts[i]};
+      if (! convey_push(conveyor, &payload, dst.rank))
+        break;
+    }
+
+    packet2_t local;
+    while( convey_pull(conveyor, &local, NULL) == convey_OK)
+      GCA[local.locIdx] = local.value;
+
   }
-
+  convey_reset(conveyor);
 
   shmem_barrier_all();
 }
@@ -374,7 +390,7 @@ void globalShuffle(DistributedArray<SortElement>& A,
                                                         COUNTS_SIZE*numRanks);
 
   // copy the per-bucket counts to the global counts array
-  copyCountsToGlobalCounts(*counts, GlobalCounts);
+  copyCountsToGlobalCounts(*counts, GlobalCounts, conveyor);
 
   // scan to fill in GlobalStarts
   exclusiveScan(GlobalCounts, GlobalStarts);
