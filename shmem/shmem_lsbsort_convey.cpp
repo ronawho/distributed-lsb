@@ -14,6 +14,10 @@
 #include <shmem.h>
 #include <pcg_random.hpp>
 
+extern "C" {
+#include "convey.h"
+}
+
 #define RADIX 16
 #define N_DIGITS (64/RADIX)
 #define N_BUCKETS (1 << RADIX)
@@ -26,6 +30,17 @@ struct SortElement {
   uint64_t key = 0; // to sort by
   uint64_t val = 0; // carried along
 };
+
+struct IdxSortElement {
+  int64_t locIdx;
+  SortElement value;
+};
+
+struct IdxValue {
+  int64_t locIdx;
+  int64_t value;
+};
+
 std::ostream& printhex(std::ostream& os, uint64_t key) {
   std::ios oldState(nullptr);
   oldState.copyfmt(os);
@@ -224,7 +239,7 @@ inline int getBucket(SortElement x, int d) {
 }
 
 void copyCountsToGlobalCounts(counts_array_t& localCounts,
-                              DistributedArray<int64_t>& GlobalCounts) {
+                              DistributedArray<int64_t>& GlobalCounts, convey_t * request) {
   int myRank = 0;
   int numRanks = 0;
   myRank = shmem_my_pe();
@@ -243,15 +258,26 @@ void copyCountsToGlobalCounts(counts_array_t& localCounts,
   //  [r0d2, r1d2, r2d2, ...]   | on rank 1 ...
   //  ...
 
-  for (int64_t i = 0; i < COUNTS_SIZE; i++) {
-    int64_t dstGlobalIdx = i*numRanks + myRank;
-    auto dst = GlobalCounts.globalIdxToLocalIdx(dstGlobalIdx);
-    int dstRank = dst.rank;
+  int64_t i = 0;
+  convey_begin(request, sizeof(IdxValue), alignof(IdxValue));
+  while (convey_advance(request, i == COUNTS_SIZE)) {
     int64_t* GCA = &GlobalCounts.localPart()[0]; // it's symmetric
+    for (; i < COUNTS_SIZE; i++) {
+      int64_t dstGlobalIdx = i*numRanks + myRank;
+      auto dst = GlobalCounts.globalIdxToLocalIdx(dstGlobalIdx);
+      int dstRank = dst.rank;
 
-    shmem_int64_put_nbi(GCA + dst.locIdx, &localCounts[i], 1, dstRank);
+      IdxValue payload = { .locIdx = dst.locIdx, .value = localCounts[i] };
+      if (! convey_push(request, &payload, dst.rank))
+        break;
+    }
+
+    IdxValue local;
+    while( convey_pull(request, &local, NULL) == convey_OK)
+      GCA[local.locIdx] = local.value;
+
   }
-
+  convey_reset(request);
 
   shmem_barrier_all();
 }
@@ -312,7 +338,8 @@ void exclusiveScan(const DistributedArray<int64_t>& Src,
 }
 
 void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
-                                counts_array_t& localStarts) {
+                                counts_array_t& localStarts, convey_t* request,
+                                convey_t* reply) {
   int myRank = 0;
   int numRanks = 0;
   myRank = shmem_my_pe();
@@ -330,14 +357,42 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
   //  ...
   //
 
-  for (int64_t i = 0; i < COUNTS_SIZE; i++) {
-    int64_t srcGlobalIdx = i*numRanks + myRank;
-    auto src = GlobalStarts.globalIdxToLocalIdx(srcGlobalIdx);
-    int srcRank = src.rank;
-    int64_t* GSA = GlobalStarts.localPart(); // it's symmetric
+  convey_begin(request, sizeof(IdxValue), alignof(IdxValue));
+  convey_begin(reply, sizeof(IdxValue), alignof(IdxValue));
 
-    shmem_int64_get(&localStarts[i], GSA + src.locIdx, 1, srcRank);
+  int64_t* GSA = GlobalStarts.localPart(); // it's symmetric
+
+  int64_t i = 0;
+  bool more;
+  while (more = convey_advance(request, i == COUNTS_SIZE),
+	 more | convey_advance(reply, !more)) {
+    for (; i < COUNTS_SIZE; i++) {
+      int64_t srcGlobalIdx = i*numRanks + myRank;
+      auto src = GlobalStarts.globalIdxToLocalIdx(srcGlobalIdx);
+      int srcRank = src.rank;
+      int64_t srcIndex = src.locIdx;
+
+      IdxValue packet = { .locIdx = i, .value = srcIndex };
+      if (! convey_push(request, &packet, srcRank))
+	break;
+    }
+
+    IdxValue* p;
+    int64_t from;
+    while ((p = (IdxValue*)convey_apull(request, &from)) != NULL) {
+      IdxValue packet = { .locIdx = p->locIdx, .value = GSA[p->value] };
+      if (! convey_push(reply, &packet, from)) {
+	convey_unpull(request);
+	break;
+      }
+    }
+
+    while ((p = (IdxValue*)convey_apull(reply, NULL)) != NULL)
+      localStarts[p->locIdx] = p->value;
   }
+
+  convey_reset(request);
+  convey_reset(reply);
 
   shmem_barrier_all();
 }
@@ -345,7 +400,7 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
 // shuffles the data from A into B
 void globalShuffle(DistributedArray<SortElement>& A,
                    DistributedArray<SortElement>& B,
-                   int digit) {
+                   int digit, convey_t* request, convey_t* reply) {
   int myRank = 0;
   int numRanks = 0;
   myRank = shmem_my_pe();
@@ -388,30 +443,47 @@ void globalShuffle(DistributedArray<SortElement>& A,
                                                         COUNTS_SIZE*numRanks);
 
   // copy the per-bucket counts to the global counts array
-  copyCountsToGlobalCounts(*counts, GlobalCounts);
+  copyCountsToGlobalCounts(*counts, GlobalCounts, request);
 
   // scan to fill in GlobalStarts
   exclusiveScan(GlobalCounts, GlobalStarts);
 
   // copy the per-bucket starts from the global counts array
-  copyStartsFromGlobalStarts(GlobalStarts, *starts);
+  copyStartsFromGlobalStarts(GlobalStarts, *starts, request, reply);
 
   // Now go through the data in B assigning each element its final
   // position and sending that data to the other ranks
   // Leave the result in B
-  SortElement* GB = B.localPart(); // it's symmetric
-  for (int64_t i = 0; i < locN; i++) {
-    SortElement elt = localPart[i];
-    int bucket = getBucket(elt, digit);
-    int64_t &next = (*starts)[bucket];
-    int64_t dstGlobalIdx = next;
-    next += 1;
+  convey_begin(request, sizeof(IdxSortElement), alignof(IdxSortElement));
 
-    // store 'elt' into 'dstGlobalIdx'
-    auto dst = B.globalIdxToLocalIdx(dstGlobalIdx);
-    assert(0 <= dst.rank && dst.rank < numRanks);
-    shmem_putmem(GB + dst.locIdx, &elt, sizeof(SortElement), dst.rank);
+  SortElement* GB = B.localPart(); // it's symmetric
+  int64_t i = 0;
+  while (convey_advance(request, i == locN)) {
+    for (; i < locN; i++) {
+      SortElement elt = localPart[i];
+      int bucket = getBucket(elt, digit);
+      int64_t &next = (*starts)[bucket];
+      int64_t dstGlobalIdx = next;
+
+      // store 'elt' into 'dstGlobalIdx'
+      auto dst = B.globalIdxToLocalIdx(dstGlobalIdx);
+
+      assert(0 <= dst.rank && dst.rank < numRanks);
+      IdxSortElement payload = { .locIdx = dst.locIdx, .value = elt };
+      if (! convey_push(request, &payload, dst.rank))
+        break;
+
+      next += 1;
+    }
+
+    IdxSortElement* local;
+    while((local = (IdxSortElement*)convey_apull(request, NULL)) != NULL) {
+      GB[local->locIdx] = local->value;
+    }
+
   }
+  convey_reset(request);
+
 }
 
 // Sort the data in A, using B as scratch space.
@@ -422,11 +494,15 @@ void mySort(DistributedArray<SortElement>& A,
   myRank = shmem_my_pe();
   numRanks = shmem_n_pes();
 
+  convey_t* request = convey_new(SIZE_MAX, 0, NULL, convey_opt_SCATTER);
+  convey_t* reply = convey_new(SIZE_MAX, 0, NULL, 0);
   assert(N_DIGITS % 2 == 0);
   for (int digit = 0; digit < N_DIGITS; digit += 2) {
-    globalShuffle(A, B, digit);
-    globalShuffle(B, A, digit+1);
+    globalShuffle(A, B, digit,   request, reply);
+    globalShuffle(B, A, digit+1, request, reply);
   }
+  convey_free(request);
+  convey_free(reply);
 }
 
 int main(int argc, char *argv[]) {
