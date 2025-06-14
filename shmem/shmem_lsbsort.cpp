@@ -16,6 +16,7 @@
 
 extern "C" {
 #include "convey.h"
+#include "biconvey.h"
 }
 
 #define RADIX 16
@@ -287,6 +288,28 @@ void exclusiveScan(const DistributedArray<int64_t>& Src,
   shmem_free(PerRankStarts);
 }
 
+static void
+lookup(const void* query, void* reply, void* context)
+{
+  int64_t* source = (int64_t*) context;
+  int64_t local;
+  memcpy(&local, query, sizeof(int64_t));
+  memcpy(reply, &source[local], sizeof(int64_t));
+}
+
+static std::chrono::time_point<std::chrono::steady_clock> start;
+static void startTimer() {
+  //shmem_barrier_all();
+  //start = std::chrono::steady_clock::now();
+}
+static void stopTimer(std::string str) {
+  //shmem_barrier_all();
+  //auto end = std::chrono::steady_clock::now();
+  //std::chrono::duration<double> elapsed = end - start;
+  //if (shmem_my_pe() == 0) 
+  //  std::cout << std::fixed << std::setw(26) << str << " in " << std::setprecision(5) << elapsed.count() << " s\n";
+}
+
 void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
                                 counts_array_t& localStarts) {
   int myRank = 0;
@@ -306,14 +329,31 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
   //  ...
   //
 
-  for (int64_t i = 0; i < COUNTS_SIZE; i++) {
-    int64_t srcGlobalIdx = i*numRanks + myRank;
-    auto src = GlobalStarts.globalIdxToLocalIdx(srcGlobalIdx);
-    int srcRank = src.rank;
-    int64_t* GSA = GlobalStarts.localPart(); // it's symmetric
+  biconvey_t* bike = biconvey_new(SIZE_MAX, 0, NULL, convey_opt_QUIET);
 
-    shmem_int64_get(&localStarts[i], GSA + src.locIdx, 1, srcRank);
+  int64_t* GSA = GlobalStarts.localPart(); // it's symmetric
+  biconvey_begin(bike, sizeof(int64_t), sizeof(int64_t), &lookup, GSA);
+
+  int64_t i = 0, j = 0;
+  while (biconvey_advance(bike, i == COUNTS_SIZE)) {
+    for (; i < COUNTS_SIZE; i++) {
+      int64_t srcGlobalIdx = i*numRanks + myRank;
+      auto src = GlobalStarts.globalIdxToLocalIdx(srcGlobalIdx);
+      int srcRank = src.rank;
+      int64_t srcIndex = src.locIdx;
+      if (! biconvey_push(bike, &srcIndex, srcRank))
+        break;
+
+      //shmem_int64_get(&localStarts[i], GSA + src.locIdx, 1, srcRank);
+    }
+    while (biconvey_pull(bike, &localStarts[j])) {
+      // fprintf(stderr, "got reply[%ld] = %016lx\n", j, target[j]);
+      j++;
+    }
   }
+  biconvey_reset(bike);
+  biconvey_free(bike);
+
 
   shmem_barrier_all();
 }
@@ -360,6 +400,7 @@ void globalShuffle(DistributedArray<SortElement>& A,
   //  [r0d2, r1d2, r2d2, ...]   | on rank 1 ...
   //  ...
 
+  startTimer();
   // create a distributed array storing the result of this transposition
   auto GlobalCounts = DistributedArray<int64_t>::create("GlobalCounts",
                                                         COUNTS_SIZE*numRanks);
@@ -367,19 +408,27 @@ void globalShuffle(DistributedArray<SortElement>& A,
   // (that will be the result of a scan operation)
   auto GlobalStarts = DistributedArray<int64_t>::create("GlobalStarts",
                                                         COUNTS_SIZE*numRanks);
+  stopTimer("created arrays");
 
+  startTimer();
   // copy the per-bucket counts to the global counts array
   copyCountsToGlobalCounts(*counts, GlobalCounts, conveyor);
+  stopTimer("copyCountsToGlobalCounts");
 
+  startTimer();
   // scan to fill in GlobalStarts
   exclusiveScan(GlobalCounts, GlobalStarts);
+  stopTimer("exclusiveScan");
 
+  startTimer();
   // copy the per-bucket starts from the global counts array
   copyStartsFromGlobalStarts(GlobalStarts, *starts);
+  stopTimer("copyStartsFromGlobalStarts");
 
   // Now go through the data in B assigning each element its final
   // position and sending that data to the other ranks
   // Leave the result in B
+  startTimer();
   convey_begin(conveyor, sizeof(packet_t), alignof(packet_t));
 
   SortElement* GB = B.localPart(); // it's symmetric
@@ -408,6 +457,8 @@ void globalShuffle(DistributedArray<SortElement>& A,
 
   }
   convey_reset(conveyor);
+  stopTimer("moved data");
+
 }
 
 // Sort the data in A, using B as scratch space.
