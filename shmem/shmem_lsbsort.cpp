@@ -310,7 +310,7 @@ static void stopTimer(std::string str) {
 }
 
 void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
-                                counts_array_t& localStarts) {
+                                counts_array_t& localStarts, convey_t* request, convey_t* reply) {
   int myRank = 0;
   int numRanks = 0;
   myRank = shmem_my_pe();
@@ -328,8 +328,8 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
   //  ...
   //
 
-  convey_t* request = convey_new(SIZE_MAX, 0, NULL, convey_opt_SCATTER);
-  convey_t* reply = convey_new(SIZE_MAX, 0, NULL, 0);
+  //convey_t* request = convey_new(SIZE_MAX, 0, NULL, convey_opt_SCATTER);
+  //convey_t* reply = convey_new(SIZE_MAX, 0, NULL, 0);
 
   convey_begin(request, sizeof(packet2_t), alignof(packet2_t));
   convey_begin(reply, sizeof(packet2_t), alignof(packet2_t));
@@ -370,8 +370,8 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
   convey_reset(reply);
   convey_reset(request);
 
-  convey_free(reply);
-  convey_free(request);
+  //convey_free(reply);
+  //convey_free(request);
 
   shmem_barrier_all();
 }
@@ -384,7 +384,7 @@ typedef struct {
 // shuffles the data from A into B
 void globalShuffle(DistributedArray<SortElement>& A,
                    DistributedArray<SortElement>& B,
-                   int digit, convey_t* conveyor) {
+                   int digit, convey_t* conveyor, convey_t* reply) {
   int myRank = 0;
   int numRanks = 0;
   myRank = shmem_my_pe();
@@ -440,7 +440,7 @@ void globalShuffle(DistributedArray<SortElement>& A,
 
   startTimer();
   // copy the per-bucket starts from the global counts array
-  copyStartsFromGlobalStarts(GlobalStarts, *starts);
+  copyStartsFromGlobalStarts(GlobalStarts, *starts, conveyor, reply);
   stopTimer("copyStartsFromGlobalStarts");
 
   // Now go through the data in B assigning each element its final
@@ -489,12 +489,14 @@ void mySort(DistributedArray<SortElement>& A,
   numRanks = shmem_n_pes();
 
   convey_t* conveyor = convey_new(SIZE_MAX, 0, NULL, convey_opt_SCATTER);
+  convey_t* reply = convey_new(SIZE_MAX, 0, NULL, 0);
   assert(N_DIGITS % 2 == 0);
   for (int digit = 0; digit < N_DIGITS; digit += 2) {
-    globalShuffle(A, B, digit, conveyor);
-    globalShuffle(B, A, digit+1, conveyor);
+    globalShuffle(A, B, digit, conveyor, reply);
+    globalShuffle(B, A, digit+1, conveyor, reply);
   }
   convey_free(conveyor);
+  convey_free(reply);
 }
 
 int main(int argc, char *argv[]) {
