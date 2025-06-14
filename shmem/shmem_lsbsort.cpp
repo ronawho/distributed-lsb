@@ -451,9 +451,10 @@ void globalShuffle(DistributedArray<SortElement>& A,
       next += 1;
     }
 
-    packet_t local;
-    while( convey_pull(conveyor, &local, NULL) == convey_OK)
-      GB[local.locIdx] = local.value;
+    packet_t* local;
+    while((local = (packet_t*)convey_apull(conveyor, NULL)) != NULL) {
+      GB[local->locIdx] = local->value;
+    }
 
   }
   convey_reset(conveyor);
