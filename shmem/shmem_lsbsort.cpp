@@ -287,15 +287,6 @@ void exclusiveScan(const DistributedArray<int64_t>& Src,
   shmem_free(PerRankStarts);
 }
 
-static void
-lookup(const void* query, void* reply, void* context)
-{
-  int64_t* source = (int64_t*) context;
-  int64_t local;
-  memcpy(&local, query, sizeof(int64_t));
-  memcpy(reply, &source[local], sizeof(int64_t));
-}
-
 static std::chrono::time_point<std::chrono::steady_clock> start;
 static void startTimer() {
   shmem_barrier_all();
