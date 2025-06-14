@@ -306,35 +306,14 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
   //  ...
   //
 
-  for (int64_t i = 0; i < COUNTS_SIZE;) {
-    // compute the number of elements that come from a particular src rank
+  for (int64_t i = 0; i < COUNTS_SIZE; i++) {
     int64_t srcGlobalIdx = i*numRanks + myRank;
     auto src = GlobalStarts.globalIdxToLocalIdx(srcGlobalIdx);
     int srcRank = src.rank;
-    int nToSameRank = 0;
-    while (i+nToSameRank < COUNTS_SIZE) {
-      int64_t ii = (i+nToSameRank)*numRanks + myRank;
-      int nextRank = GlobalStarts.globalIdxToLocalIdx(ii).rank;
-      if (nextRank != srcRank) {
-        break;
-      }
-      nToSameRank++;
-    }
-    assert(nToSameRank >= 1);
-
     int64_t* GSA = GlobalStarts.localPart(); // it's symmetric
 
-    shmem_int64_iget(  &localStarts[i],  // dst region on the local PE
-                       GSA + src.locIdx, // src region on the remote PE
-                       1,                // stride for destination array
-                       numRanks,         // stride for source array
-                       nToSameRank,      // number of elements
-                       srcRank           // source rank
-                    );
-
-    i += nToSameRank;
+    shmem_int64_get(&localStarts[i], GSA + src.locIdx, 1, srcRank);
   }
-
 
   shmem_barrier_all();
 }
