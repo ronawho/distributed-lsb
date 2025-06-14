@@ -16,7 +16,6 @@
 
 extern "C" {
 #include "convey.h"
-#include "biconvey.h"
 }
 
 #define RADIX 16
@@ -183,7 +182,7 @@ inline int getBucket(SortElement x, int d) {
   return (x.key >> (RADIX*d)) & MASK;
 }
 typedef struct {
-  int64_t locIdx;
+  int64_t index;
   int64_t value;
 } packet2_t;
 
@@ -225,7 +224,7 @@ void copyCountsToGlobalCounts(counts_array_t& localCounts,
 
     packet2_t local;
     while( convey_pull(conveyor, &local, NULL) == convey_OK)
-      GCA[local.locIdx] = local.value;
+      GCA[local.index] = local.value;
 
   }
   convey_reset(conveyor);
@@ -299,15 +298,15 @@ lookup(const void* query, void* reply, void* context)
 
 static std::chrono::time_point<std::chrono::steady_clock> start;
 static void startTimer() {
-  //shmem_barrier_all();
-  //start = std::chrono::steady_clock::now();
+  shmem_barrier_all();
+  start = std::chrono::steady_clock::now();
 }
 static void stopTimer(std::string str) {
-  //shmem_barrier_all();
-  //auto end = std::chrono::steady_clock::now();
-  //std::chrono::duration<double> elapsed = end - start;
-  //if (shmem_my_pe() == 0) 
-  //  std::cout << std::fixed << std::setw(26) << str << " in " << std::setprecision(5) << elapsed.count() << " s\n";
+  shmem_barrier_all();
+  auto end = std::chrono::steady_clock::now();
+  std::chrono::duration<double> elapsed = end - start;
+  if (shmem_my_pe() == 0) 
+    std::cout << std::fixed << std::setw(26) << str << " in " << std::setprecision(5) << elapsed.count() << " s\n";
 }
 
 void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
@@ -329,31 +328,50 @@ void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
   //  ...
   //
 
-  biconvey_t* bike = biconvey_new(SIZE_MAX, 0, NULL, convey_opt_QUIET);
+  convey_t* request = convey_new(SIZE_MAX, 0, NULL, convey_opt_SCATTER);
+  convey_t* reply = convey_new(SIZE_MAX, 0, NULL, 0);
+
+  convey_begin(request, sizeof(packet2_t), alignof(packet2_t));
+  convey_begin(reply, sizeof(packet2_t), alignof(packet2_t));
+
+  long n = 0;
+  bool more;
 
   int64_t* GSA = GlobalStarts.localPart(); // it's symmetric
-  biconvey_begin(bike, sizeof(int64_t), sizeof(int64_t), &lookup, GSA);
+  int64_t i = 0;
 
-  int64_t i = 0, j = 0;
-  while (biconvey_advance(bike, i == COUNTS_SIZE)) {
+  while (more = convey_advance(request, i == COUNTS_SIZE),
+	 more | convey_advance(reply, !more)) {
     for (; i < COUNTS_SIZE; i++) {
       int64_t srcGlobalIdx = i*numRanks + myRank;
       auto src = GlobalStarts.globalIdxToLocalIdx(srcGlobalIdx);
       int srcRank = src.rank;
       int64_t srcIndex = src.locIdx;
-      if (! biconvey_push(bike, &srcIndex, srcRank))
-        break;
 
-      //shmem_int64_get(&localStarts[i], GSA + src.locIdx, 1, srcRank);
+      packet2_t packet = { .index = i, .value = srcIndex };
+      if (! convey_push(request, &packet, srcRank))
+	break;
     }
-    while (biconvey_pull(bike, &localStarts[j])) {
-      // fprintf(stderr, "got reply[%ld] = %016lx\n", j, target[j]);
-      j++;
+
+    packet2_t* p;
+    int64_t from;
+    while ((p = (packet2_t*)convey_apull(request, &from)) != NULL) {
+      packet2_t packet = { .index = p->index, .value = GSA[p->value] };
+      if (! convey_push(reply, &packet, from)) {
+	convey_unpull(request);
+	break;
+      }
     }
+
+    while ((p = (packet2_t*)convey_apull(reply, NULL)) != NULL)
+      localStarts[p->index] = p->value;
   }
-  biconvey_reset(bike);
-  biconvey_free(bike);
 
+  convey_reset(reply);
+  convey_reset(request);
+
+  convey_free(reply);
+  convey_free(request);
 
   shmem_barrier_all();
 }
