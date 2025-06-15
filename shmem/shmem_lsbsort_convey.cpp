@@ -337,6 +337,19 @@ void exclusiveScan(const DistributedArray<int64_t>& Src,
   shmem_free(PerRankStarts);
 }
 
+static std::chrono::time_point<std::chrono::steady_clock> start;
+static void startTimer() {
+  shmem_barrier_all();
+  start = std::chrono::steady_clock::now();
+}
+static void stopTimer(std::string str) {
+  shmem_barrier_all();
+  auto end = std::chrono::steady_clock::now();
+  std::chrono::duration<double> elapsed = end - start;
+  if (shmem_my_pe() == 0)
+    std::cout << std::fixed << std::setw(26) << str << " in " << std::setprecision(5) << elapsed.count() << " s\n";
+}
+
 void copyStartsFromGlobalStarts(DistributedArray<int64_t>& GlobalStarts,
                                 counts_array_t& localStarts, convey_t* request,
                                 convey_t* reply) {
@@ -434,6 +447,7 @@ void globalShuffle(DistributedArray<SortElement>& A,
   //  [r0d2, r1d2, r2d2, ...]   | on rank 1 ...
   //  ...
 
+  startTimer();
   // create a distributed array storing the result of this transposition
   auto GlobalCounts = DistributedArray<int64_t>::create("GlobalCounts",
                                                         COUNTS_SIZE*numRanks);
@@ -441,19 +455,27 @@ void globalShuffle(DistributedArray<SortElement>& A,
   // (that will be the result of a scan operation)
   auto GlobalStarts = DistributedArray<int64_t>::create("GlobalStarts",
                                                         COUNTS_SIZE*numRanks);
+  stopTimer("created arrays");
 
+  startTimer();
   // copy the per-bucket counts to the global counts array
   copyCountsToGlobalCounts(*counts, GlobalCounts, request);
+  stopTimer("copyCountsToGlobalCounts");
 
+  startTimer();
   // scan to fill in GlobalStarts
   exclusiveScan(GlobalCounts, GlobalStarts);
+  stopTimer("exclusiveScan");
 
+  startTimer();
   // copy the per-bucket starts from the global counts array
   copyStartsFromGlobalStarts(GlobalStarts, *starts, request, reply);
+  stopTimer("copyStartsFromGlobalStarts");
 
   // Now go through the data in B assigning each element its final
   // position and sending that data to the other ranks
   // Leave the result in B
+  startTimer();
   convey_begin(request, sizeof(IdxSortElement), alignof(IdxSortElement));
 
   SortElement* GB = B.localPart(); // it's symmetric
@@ -483,6 +505,7 @@ void globalShuffle(DistributedArray<SortElement>& A,
 
   }
   convey_reset(request);
+  stopTimer("moved data");
 
 }
 
