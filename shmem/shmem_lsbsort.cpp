@@ -42,6 +42,9 @@ std::ostream& operator<<(std::ostream& os, const SortElement& x) {
 bool operator==(const SortElement& x, const SortElement& y) {
   return x.key == y.key && x.val == y.val;
 }
+bool operator<(const SortElement& x, const SortElement& y) {
+  return x.key < y.key;
+}
 
 // to help with sending sort elements to remote locales
 // helper to divide while rounding up
@@ -105,6 +108,7 @@ struct DistributedArray {
 
   // helper to print part of the distributed array
   void print(int64_t nToPrintPerRank) const;
+  bool checkSorted() const;
 };
 
 template<typename EltType>
@@ -171,6 +175,47 @@ void DistributedArray<EltType>::print(int64_t nToPrintPerRank) const {
     }
     shmem_barrier_all();
   }
+}
+
+template<typename EltType>
+bool DistributedArray<EltType>::checkSorted() const {
+    int myRank = 0;
+    int numRanks = 0;
+    myRank = shmem_my_pe();
+    numRanks = shmem_n_pes();
+
+    int8_t* locallySorted = (int8_t*)shmem_malloc(sizeof(int8_t));
+    EltType* myBoundaries = (EltType*)shmem_malloc(2*sizeof(EltType));
+    EltType* allBoundaries = (EltType*)shmem_malloc(2*numRanks*sizeof(EltType));
+    int64_t* numBoundaries = (int64_t*)shmem_malloc(sizeof(int64_t));
+
+    // Check if the local array is sorted
+    std::vector<EltType> myVec(localPart_, localPart_+numElementsHere_);
+    *locallySorted = std::is_sorted(myVec.begin(), myVec.end());
+
+    // Check if the boundaries between PEs are sorted (make sure that the last
+    // element on myRank < first element on myRank+1). To simplify cases where
+    // the number of elements per rank isn't uniform just exchange first/last
+    // with every rank and check all boundaries locally. When there's fewer
+    // elements than ranks, some ranks can have duplicates (but that's fine)
+    // and others will have uninitialized memory that won't be looked at.
+    *numBoundaries = 0;
+    if (numElementsHere_) {
+      myBoundaries[0] = myVec.front();
+      myBoundaries[1] = myVec.back();
+      *numBoundaries = 2;
+    }
+
+    shmem_barrier_all();
+    shmem_fcollectmem(SHMEM_TEAM_WORLD, allBoundaries, myBoundaries, 2*sizeof(EltType));
+    shmem_int8_and_reduce(SHMEM_TEAM_WORLD, locallySorted, locallySorted, 1);
+    shmem_int64_sum_reduce(SHMEM_TEAM_WORLD, numBoundaries, numBoundaries, 1);
+    shmem_barrier_all();
+
+    std::vector<EltType> boundariesVec(allBoundaries, allBoundaries+*numBoundaries);
+    bool boundariesSorted = std::is_sorted(boundariesVec.begin(), boundariesVec.end());
+
+    return *locallySorted && boundariesSorted;
 }
 
 // compute the bucket for a value when sort is on digit 'd'
@@ -431,8 +476,7 @@ int main(int argc, char *argv[]) {
 
   // read in the problem size
   bool printSome = false;
-  bool verifyLocally = false;
-  bool verifyLocallySet = false;
+  bool verify = true;
   int64_t n = 100*1000*1000;
   for (int i = 1; i < argc; i++) {
     if (std::string(argv[i]) == "--n") {
@@ -440,16 +484,10 @@ int main(int argc, char *argv[]) {
     } else if (std::string(argv[i]) == "--print") {
       printSome = true;
     } else if (std::string(argv[i]) == "--verify") {
-      verifyLocally = true;
-      verifyLocallySet = true;
+      verify = true;
     } else if (std::string(argv[i]) == "--no-verify") {
-      verifyLocally = false;
-      verifyLocallySet = true;
+      verify = false;
     }
-  }
-
-  if (!verifyLocallySet) {
-    verifyLocally = (n < 128*1024*1024);
   }
 
   int myRank = 0;
@@ -466,7 +504,6 @@ int main(int argc, char *argv[]) {
   // create distributed arrays A and B
   auto A = DistributedArray<SortElement>::create("A", n);
   auto B = DistributedArray<SortElement>::create("B", n);
-  std::vector<SortElement> LocalInputCopy;
 
   // set the keys to random values and the values to global indices
   {
@@ -528,8 +565,20 @@ int main(int argc, char *argv[]) {
     A.print(10);
   }
 
+  bool sorted = true;
+  if (verify) {
+    sorted = A.checkSorted();
+    if (myRank == 0) {
+      if (sorted) {
+        std::cout << "Array is sorted\n";
+      } else {
+        std::cout << "Array is NOT sorted\n";
+      }
+    }
+  }
+
   // this seems to cause crashes/hangs with openmpi shmem / osss-ucx
   //shmem_finalize();
 
-  return 0;
+  return !sorted;
 }
